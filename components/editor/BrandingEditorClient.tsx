@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Canvas, FabricImage, Group, Circle, Point as FabricPoint } from 'fabric';
+import { Canvas, FabricImage, Group, Point as FabricPoint } from 'fabric';
 import {
   ImageMetadata,
   PlateOptions,
@@ -22,8 +22,7 @@ import {
   getWatermarkCoords,
   fitDimensions,
 } from '../../lib/canvasHelpers';
-import { generateExportDataUrl, renderFlatPlateCanvas } from '../../lib/exportHelpers';
-import { warpCanvasPerspective, isConvex } from '../../lib/perspectiveWarp';
+import { generateExportDataUrl } from '../../lib/exportHelpers';
 import ImageUploader from '../ImageUploader';
 import EditorToolbar from '../EditorToolbar';
 import PlateSettings from '../PlateSettings';
@@ -31,13 +30,12 @@ import WatermarkSettings from '../WatermarkSettings';
 import ExportPanel from '../ExportPanel';
 import BeforeAfterToggle from '../BeforeAfterToggle';
 import ConfirmDialog from '../ConfirmDialog';
-import { Eye, ShieldCheck, Palette, Image as ImageIcon, Download, RefreshCw, ZoomIn } from 'lucide-react';
+import { Eye, ShieldCheck, Palette, Image as ImageIcon, Download, RefreshCw } from 'lucide-react';
 
 interface SavedPlateState {
   id: string;
   plateMode: PlateMode;
   plateOptions: PlateOptions;
-  corners: Point[] | null;
   left: number;
   top: number;
   scaleX: number;
@@ -75,9 +73,6 @@ export default function BrandingEditorClient() {
   const bgFabricObjectRef = useRef<FabricImage | null>(null);
   const watermarkFabricObjectRef = useRef<FabricImage | null>(null);
 
-  // Perspective Handles Ref
-  const handlesRef = useRef<Circle[]>([]);
-
   // Active object selection tracker
   const [activeObject, setActiveObject] = useState<any | null>(null);
 
@@ -106,20 +101,13 @@ export default function BrandingEditorClient() {
     customLogoUrl: null,
   });
 
-  // Perspective State for Selected Plate
-  const [selectedPlateMode, setSelectedPlateMode] = useState<PlateMode>('standard');
-
   // UI Tabs & Zoom states
   const [activeTab, setActiveTab] = useState<'plates' | 'watermark' | 'export'>('plates');
-  const [zoomLevel, setZoomLevel] = useState<number>(1.0); // Viewport Zoom (1.0 = Fit to Screen)
-  const [displayScale, setDisplayScale] = useState<number>(1.0); // displayWidth / originalWidth
+  const [displayScale, setDisplayScale] = useState<number>(1.0); // fitScale (displayWidth / originalWidth)
   
   const [isPreviewActive, setIsPreviewActive] = useState<boolean>(false);
   const [isConfirmResetOpen, setIsConfirmResetOpen] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
-  
-  // Panning State
-  const [spacePressed, setSpacePressed] = useState(false);
 
   // Export Settings
   const [exportPreset, setExportPreset] = useState<ExportPreset>('original');
@@ -134,29 +122,6 @@ export default function BrandingEditorClient() {
   const [redoStack, setRedoStack] = useState<SavedCanvasState[]>([]);
   const isSyncingRef = useRef(false);
 
-  const handleUndo = () => {
-    if (undoStack.length <= 1) return; // Keep at least the initial state
-
-    const current = undoStack[undoStack.length - 1];
-    const prev = undoStack[undoStack.length - 2];
-
-    setUndoStack((prevStack) => prevStack.slice(0, -1));
-    setRedoStack((prevStack) => [...prevStack, current]);
-
-    applyCanvasState(prev);
-  };
-
-  const handleRedo = () => {
-    if (redoStack.length === 0) return;
-
-    const next = redoStack[redoStack.length - 1];
-
-    setRedoStack((prevStack) => prevStack.slice(0, -1));
-    setUndoStack((prevStack) => [...prevStack, next]);
-
-    applyCanvasState(next);
-  };
-
   // Clean up Object URL
   const clearImageUrl = () => {
     if (imageUrl) {
@@ -167,11 +132,9 @@ export default function BrandingEditorClient() {
     bgImageElementRef.current = null;
     bgFabricObjectRef.current = null;
     watermarkFabricObjectRef.current = null;
-    handlesRef.current = [];
     setActiveObject(null);
     setUndoStack([]);
     setRedoStack([]);
-    setZoomLevel(1.0);
     setDisplayScale(1.0);
     setIsPreviewActive(false);
     setIsWatermarkManual(false);
@@ -205,9 +168,8 @@ export default function BrandingEditorClient() {
       .map((obj: any) => {
         return {
           id: obj.id,
-          plateMode: obj.plateMode || 'standard',
+          plateMode: 'standard' as PlateMode,
           plateOptions: { ...obj.plateOptions },
-          corners: obj.corners ? obj.corners.map((p: any) => ({ x: p.x, y: p.y })) : null,
           left: obj.left,
           top: obj.top,
           scaleX: obj.scaleX,
@@ -242,7 +204,6 @@ export default function BrandingEditorClient() {
     if (!snap) return;
 
     setUndoStack((prev) => {
-      // Prevent duplicate states in sequence
       const last = prev[prev.length - 1];
       if (last && JSON.stringify(last) === JSON.stringify(snap)) {
         return prev;
@@ -260,9 +221,6 @@ export default function BrandingEditorClient() {
     isSyncingRef.current = true;
 
     try {
-      // Remove any existing perspective handles
-      clearPerspectiveHandles(canvas);
-
       // 1. Watermark Settings
       setWatermarkOptions((prev) => ({
         ...prev,
@@ -303,79 +261,36 @@ export default function BrandingEditorClient() {
         const existing = existingPlates.find((p) => (p as any).id === plateState.id) as any;
         
         if (existing) {
-          existing.plateMode = plateState.plateMode;
           existing.plateOptions = { ...plateState.plateOptions };
-          existing.corners = plateState.corners ? plateState.corners.map((p) => ({ ...p })) : null;
-
-          if (plateState.plateMode === 'standard') {
-            // Restore standard plate group
-            updatePlateProperties(existing, plateState.plateOptions);
-            existing.set({
-              left: plateState.left,
-              top: plateState.top,
-              scaleX: plateState.scaleX,
-              scaleY: plateState.scaleY,
-              angle: plateState.angle,
-              opacity: plateState.opacity,
-            });
-            existing.setCoords();
-          } else {
-            // Restore warped plate image
-            const flatCanvas = renderFlatPlateCanvas(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
-            const warpedCanvas = warpCanvasPerspective(flatCanvas, plateState.corners!);
-            existing.setElement(warpedCanvas);
-            
-            const minX = Math.min(...plateState.corners!.map((p) => p.x));
-            const minY = Math.min(...plateState.corners!.map((p) => p.y));
-            existing.set({
-              left: minX,
-              top: minY,
-              scaleX: 1,
-              scaleY: 1,
-              angle: 0,
-              opacity: plateState.opacity,
-            });
-            existing.setCoords();
-          }
+          updatePlateProperties(existing, plateState.plateOptions);
+          existing.set({
+            left: plateState.left,
+            top: plateState.top,
+            scaleX: plateState.scaleX,
+            scaleY: plateState.scaleY,
+            angle: plateState.angle,
+            opacity: plateState.opacity,
+          });
+          existing.setCoords();
         } else {
           // Re-create plate
-          let newPlate: any;
-          if (plateState.plateMode === 'standard') {
-            newPlate = createNamePlate(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
-            newPlate.set({
-              left: plateState.left,
-              top: plateState.top,
-              scaleX: plateState.scaleX,
-              scaleY: plateState.scaleY,
-              angle: plateState.angle,
-            });
-          } else {
-            const flatCanvas = renderFlatPlateCanvas(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
-            const warpedCanvas = warpCanvasPerspective(flatCanvas, plateState.corners!);
-            newPlate = new FabricImage(warpedCanvas, {
-              opacity: plateState.opacity,
-              selectable: true,
-            });
-            newPlate.isNamePlate = true;
-            
-            const minX = Math.min(...plateState.corners!.map((p) => p.x));
-            const minY = Math.min(...plateState.corners!.map((p) => p.y));
-            newPlate.set({
-              left: minX,
-              top: minY,
-            });
-          }
+          const newPlate = createNamePlate(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
+          newPlate.set({
+            left: plateState.left,
+            top: plateState.top,
+            scaleX: plateState.scaleX,
+            scaleY: plateState.scaleY,
+            angle: plateState.angle,
+          });
 
-          newPlate.id = plateState.id;
-          newPlate.plateMode = plateState.plateMode;
-          newPlate.plateOptions = { ...plateState.plateOptions };
-          newPlate.corners = plateState.corners ? plateState.corners.map((p) => ({ ...p })) : null;
+          (newPlate as any).id = plateState.id;
+          (newPlate as any).plateMode = 'standard';
+          (newPlate as any).plateOptions = { ...plateState.plateOptions };
           
           canvas.add(newPlate);
         }
       }
 
-      // If active object changed, re-sync selection state
       const currentActive = canvas.getActiveObject();
       if (currentActive) {
         handleSelectionChange(currentActive);
@@ -389,44 +304,225 @@ export default function BrandingEditorClient() {
     }
   };
 
-  // Keyboard Spacebar Tracking for Panning
-  useEffect(() => {
-    const handleSpaceDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        const activeEl = document.activeElement;
-        const isTyping =
-          activeEl &&
-          (activeEl.tagName === 'INPUT' ||
-            activeEl.tagName === 'TEXTAREA' ||
-            activeEl.getAttribute('contenteditable') === 'true');
+  const handleUndo = () => {
+    if (undoStack.length <= 1) return;
+    const current = undoStack[undoStack.length - 1];
+    const prev = undoStack[undoStack.length - 2];
+    setUndoStack((prevStack) => prevStack.slice(0, -1));
+    setRedoStack((prevStack) => [...prevStack, current]);
+    applyCanvasState(prev);
+  };
 
-        if (!isTyping) {
-          e.preventDefault();
-          setSpacePressed(true);
-        }
+  const handleRedo = () => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack((prevStack) => prevStack.slice(0, -1));
+    setUndoStack((prevStack) => [...prevStack, next]);
+    applyCanvasState(next);
+  };
+
+  // ==================================================
+  // 1. INITIALIZE CANVAS WITH ORIGINAL COORDINATES
+  // ==================================================
+  const initializeImageCanvas = (bgImage: HTMLImageElement): Canvas => {
+    const originalWidth = bgImage.naturalWidth;
+    const originalHeight = bgImage.naturalHeight;
+
+    // Reset fabric canvas instance
+    if (fabricCanvasRef.current) {
+      fabricCanvasRef.current.dispose();
+    }
+
+    // Set Fabric logical dimensions exactly once (cssOnly: false)
+    // and disable Retina scaling to prevent drawing buffer mismatches
+    const canvas = new Canvas(canvasElRef.current!, {
+      width: originalWidth,
+      height: originalHeight,
+      enableRetinaScaling: false,
+      selectionColor: 'rgba(128, 0, 0, 0.15)',
+      selectionBorderColor: '#8B0000',
+      selectionLineWidth: 1.5,
+    });
+    
+    fabricCanvasRef.current = canvas;
+
+    // ==================================================
+    // 2. LOAD BACKGROUND PHOTO AT 1:1 scale
+    // ==================================================
+    const fabricBg = new FabricImage(bgImage, {
+      left: 0,
+      top: 0,
+      originX: 'left',
+      originY: 'top',
+      scaleX: 1,
+      scaleY: 1,
+      selectable: false,
+      evented: false,
+      lockMovementX: true,
+      lockMovementY: true,
+      lockScalingX: true,
+      lockScalingY: true,
+      lockRotation: true,
+      hasControls: false,
+      hasBorders: false,
+      angle: 0,
+    });
+
+    // Check for exact natural dimensions scaling
+    const imageScaleX = originalWidth / fabricBg.width;
+    const imageScaleY = originalHeight / fabricBg.height;
+    fabricBg.set({ scaleX: imageScaleX, scaleY: imageScaleY });
+
+    bgFabricObjectRef.current = fabricBg;
+    canvas.add(fabricBg);
+    canvas.sendObjectToBack(fabricBg);
+
+    return canvas;
+  };
+
+  // ==================================================
+  // 3. DISPLAY-SCALE THE CANVAS ELEMENTS VIA CSS
+  // ==================================================
+  const fitCanvasToEditor = (
+    canvas: Canvas,
+    originalWidth: number,
+    originalHeight: number,
+    containerWidth: number,
+    containerHeight: number
+  ): number => {
+    const fitScale = Math.min(
+      containerWidth / originalWidth,
+      containerHeight / originalHeight,
+      1
+    );
+
+    const displayWidth = Math.round(originalWidth * fitScale);
+    const displayHeight = Math.round(originalHeight * fitScale);
+
+    // Apply exact CSS widths and heights to all layers and wrappers
+    if (canvas.wrapperEl) {
+      canvas.wrapperEl.style.width = `${displayWidth}px`;
+      canvas.wrapperEl.style.height = `${displayHeight}px`;
+      canvas.wrapperEl.style.left = '0';
+      canvas.wrapperEl.style.top = '0';
+      canvas.wrapperEl.style.transform = 'none';
+    }
+    if (canvas.lowerCanvasEl) {
+      canvas.lowerCanvasEl.style.width = `${displayWidth}px`;
+      canvas.lowerCanvasEl.style.height = `${displayHeight}px`;
+      canvas.lowerCanvasEl.style.left = '0';
+      canvas.lowerCanvasEl.style.top = '0';
+      canvas.lowerCanvasEl.style.transform = 'none';
+    }
+    if (canvas.upperCanvasEl) {
+      canvas.upperCanvasEl.style.width = `${displayWidth}px`;
+      canvas.upperCanvasEl.style.height = `${displayHeight}px`;
+      canvas.upperCanvasEl.style.left = '0';
+      canvas.upperCanvasEl.style.top = '0';
+      canvas.upperCanvasEl.style.transform = 'none';
+    }
+
+    // ==================================================
+    // 8. UPDATE MOUSE POINTER OFFSET SCALING
+    // ==================================================
+    canvas.calcOffset();
+    canvas.requestRenderAll();
+
+    return fitScale;
+  };
+
+  // ==================================================
+  // 7. POSITION WATERMARK LOGO AT ORIGINAL RESOLUTION
+  // ==================================================
+  const addDefaultWatermark = async (
+    canvas: Canvas,
+    originalWidth: number,
+    originalHeight: number,
+    customUrl?: string
+  ) => {
+    setLogoError(null);
+    const logoUrl = customUrl || watermarkOptions.customLogoUrl || '/branding/thennakoon-tours-logo.png';
+
+    try {
+      const logoImg = await loadLogoImage(logoUrl);
+
+      if (watermarkFabricObjectRef.current) {
+        canvas.remove(watermarkFabricObjectRef.current);
       }
-    };
 
-    const handleSpaceUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        setSpacePressed(false);
+      // Watermark width is 18% of original photo width, margin is 3%
+      const targetLogoWidth = originalWidth * 0.18;
+      const logoScale = targetLogoWidth / logoImg.naturalWidth;
+
+      const wm = new FabricImage(logoImg, {
+        scaleX: logoScale,
+        scaleY: logoScale,
+        left: originalWidth * 0.03,
+        top: originalHeight - (logoImg.naturalHeight * logoScale) - (originalWidth * 0.03),
+        opacity: watermarkOptions.opacity,
+        visible: watermarkOptions.visible && !isPreviewActive,
+        selectable: true,
+        hasControls: true,
+        hasBorders: true,
+        transparentCorners: false,
+        cornerColor: '#8B0000',
+        cornerStrokeColor: '#FFFFFF',
+        borderColor: '#8B0000',
+        cornerSize: 12,
+        originX: 'left',
+        originY: 'top',
+      });
+
+      (wm as any).isWatermark = true;
+      watermarkFabricObjectRef.current = wm;
+      canvas.add(wm);
+      canvas.bringObjectToFront(wm);
+      canvas.renderAll();
+    } catch (err) {
+      console.warn('Default logo asset failed to load:', err);
+      setLogoError('Watermark image not found. Upload custom logo or verify assets.');
+      if (watermarkFabricObjectRef.current) {
+        canvas.remove(watermarkFabricObjectRef.current);
+        watermarkFabricObjectRef.current = null;
       }
-    };
+    }
+  };
 
-    window.addEventListener('keydown', handleSpaceDown);
-    window.addEventListener('keyup', handleSpaceUp);
+  // ==================================================
+  // 9. EXPORT INDEPENDENT ORIGINAL-SIZE DATA URL
+  // ==================================================
+  const exportOriginalImage = (): string | null => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !imageMetadata) return null;
 
-    return () => {
-      window.removeEventListener('keydown', handleSpaceDown);
-      window.removeEventListener('keyup', handleSpaceUp);
-    };
-  }, []);
+    // 1. Store active selection
+    const active = canvas.getActiveObject();
 
-  // Main Canvas Setup Hook
+    // 2. Clear selection
+    canvas.discardActiveObject();
+    canvas.renderAll();
+
+    // 3. Export at original width x height
+    const mimeType = exportFormat === 'jpeg' ? 'image/jpeg' : 'image/png';
+    const dataUrl = canvas.toDataURL({
+      format: exportFormat === 'jpeg' ? 'jpeg' : 'png',
+      quality: exportFormat === 'jpeg' ? exportQuality : undefined,
+      multiplier: 1.0,
+    });
+
+    // 4. Restore active selection
+    if (active) {
+      canvas.setActiveObject(active);
+    }
+    canvas.renderAll();
+
+    return dataUrl;
+  };
+
+  // Main Canvas Setup Lifecycle Hook
   useEffect(() => {
     if (!imageUrl || !canvasElRef.current || !containerRef.current) return;
 
-    let canvas: Canvas;
     const bgImage = new Image();
 
     bgImage.onload = async () => {
@@ -434,62 +530,46 @@ export default function BrandingEditorClient() {
       const originalWidth = bgImage.naturalWidth;
       const originalHeight = bgImage.naturalHeight;
 
-      // 1. Fit Canvas visually within container
+      // 1. Initialize Fabric Canvas
+      const canvas = initializeImageCanvas(bgImage);
+
+      // 2. Calculate editor container display dimensions
       const containerWidth = containerRef.current?.clientWidth || 800;
       const containerHeight = Math.min(500, window.innerHeight * 0.5);
 
-      const { width: displayWidth, height: displayHeight } = fitDimensions(
+      // 3. Scale CSS visual elements
+      const fitScale = fitCanvasToEditor(
+        canvas,
         originalWidth,
         originalHeight,
         containerWidth,
         containerHeight
       );
+      setDisplayScale(fitScale);
 
-      const initialScale = displayWidth / originalWidth;
-      setDisplayScale(initialScale);
-
-      // 2. Initialize Fabric Canvas
-      // We set the actual drawing buffer (width, height) to original dimensions!
-      // And we set CSS size using options or manually to displayWidth, displayHeight.
-      // This is the 1:1 logical original-image coordinates system.
-      canvas = new Canvas(canvasElRef.current!, {
-        width: originalWidth,
-        height: originalHeight,
-        selectionColor: 'rgba(128, 0, 0, 0.15)',
-        selectionBorderColor: '#8B0000',
-        selectionLineWidth: 1.5,
-        fireRightClick: true, // For potential future panning
+      // ==================================================
+      // 10. DIAGNOSTICS LOGGING
+      // ==================================================
+      console.log('Canvas Diagnostics:', {
+        naturalImageWidth: originalWidth,
+        naturalImageHeight: originalHeight,
+        fabricImageWidth: bgFabricObjectRef.current?.width,
+        fabricImageHeight: bgFabricObjectRef.current?.height,
+        logicalCanvasWidth: canvas.width,
+        logicalCanvasHeight: canvas.height,
+        containerWidth,
+        containerHeight,
+        fitScale,
+        lowerCanvasInternalWidth: canvas.lowerCanvasEl?.width,
+        lowerCanvasInternalHeight: canvas.lowerCanvasEl?.height,
+        lowerCanvasCssWidth: canvas.lowerCanvasEl?.style.width,
+        lowerCanvasCssHeight: canvas.lowerCanvasEl?.style.height,
+        upperCanvasCssWidth: canvas.upperCanvasEl?.style.width,
+        upperCanvasCssHeight: canvas.upperCanvasEl?.style.height,
       });
-      fabricCanvasRef.current = canvas;
-
-      // Apply CSS visual scale to fit the container correctly
-      canvas.setDimensions(
-        { width: displayWidth + 'px', height: displayHeight + 'px' },
-        { cssOnly: true }
-      );
-
-      // 3. Add Background Image at 1:1 scale (Original coordinate space!)
-      const fabricBg = new FabricImage(bgImage, {
-        left: 0,
-        top: 0,
-        scaleX: 1,
-        scaleY: 1,
-        selectable: false,
-        evented: false,
-        lockMovementX: true,
-        lockMovementY: true,
-        lockScalingX: true,
-        lockScalingY: true,
-        lockRotation: true,
-        hasControls: false,
-        hasBorders: false,
-      });
-      bgFabricObjectRef.current = fabricBg;
-      canvas.add(fabricBg);
-      canvas.sendObjectToBack(fabricBg);
 
       // 4. Load watermark logo
-      await handleInitializeWatermark(canvas, originalWidth, originalHeight);
+      await addDefaultWatermark(canvas, originalWidth, originalHeight);
 
       // 5. Canvas Event Listeners
       canvas.on('selection:created', (e) => {
@@ -504,58 +584,6 @@ export default function BrandingEditorClient() {
         handleSelectionChange(null);
       });
 
-      // Helper to safely extract mouse or touch event coordinates
-      const getEventCoords = (e: any) => {
-        if (e.touches && e.touches.length > 0) {
-          return { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
-        }
-        if (e.changedTouches && e.changedTouches.length > 0) {
-          return { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY };
-        }
-        return { clientX: e.clientX || 0, clientY: e.clientY || 0 };
-      };
-
-      // Panning Listeners
-      let isPanning = false;
-      let lastPosX = 0;
-      let lastPosY = 0;
-
-      canvas.on('mouse:down', (opt) => {
-        const evt = opt.e;
-        // Pan on Spacebar down or Alt key down
-        if (spacePressed || evt.altKey) {
-          isPanning = true;
-          canvas.selection = false;
-          const coords = getEventCoords(evt);
-          lastPosX = coords.clientX;
-          lastPosY = coords.clientY;
-          canvas.discardActiveObject();
-          canvas.renderAll();
-        }
-      });
-
-      canvas.on('mouse:move', (opt) => {
-        if (isPanning) {
-          const evt = opt.e;
-          const vpt = (canvas.viewportTransform ? [...canvas.viewportTransform] : [1, 0, 0, 1, 0, 0]) as [number, number, number, number, number, number];
-          
-          const coords = getEventCoords(evt);
-          vpt[4] += coords.clientX - lastPosX;
-          vpt[5] += coords.clientY - lastPosY;
-          
-          canvas.viewportTransform = vpt;
-          canvas.requestRenderAll();
-          
-          lastPosX = coords.clientX;
-          lastPosY = coords.clientY;
-        }
-      });
-
-      canvas.on('mouse:up', () => {
-        isPanning = false;
-        canvas.selection = true;
-      });
-
       // Save initial state to history stack
       const initialSnap = captureCanvasStateSnapshot();
       if (initialSnap) {
@@ -567,8 +595,7 @@ export default function BrandingEditorClient() {
 
     bgImage.src = imageUrl;
 
-    // 6. Setup ResizeObserver to handle container scaling automatically
-    // Resolves the tiny-image display bug by recalculating dimensions as layout loads
+    // 6. Setup ResizeObserver to handle container scaling automatically (CSS scaling only!)
     const observer = new ResizeObserver((entries) => {
       if (entries.length === 0 || !fabricCanvasRef.current || !bgImageElementRef.current) return;
       const fCanvas = fabricCanvasRef.current;
@@ -577,94 +604,26 @@ export default function BrandingEditorClient() {
       const containerWidth = entries[0].contentRect.width || 800;
       const containerHeight = Math.min(500, window.innerHeight * 0.5);
 
-      const { width: newWidth, height: newHeight } = fitDimensions(
+      const scale = fitCanvasToEditor(
+        fCanvas,
         bgImg.naturalWidth,
         bgImg.naturalHeight,
         containerWidth,
         containerHeight
       );
-
-      const currentScale = newWidth / bgImg.naturalWidth;
-      setDisplayScale(currentScale);
-
-      // Simply update the CSS dimensions of the canvas element
-      // Logical sizes and object coordinates remain completely untouched!
-      fCanvas.setDimensions(
-        { width: newWidth + 'px', height: newHeight + 'px' },
-        { cssOnly: true }
-      );
-      fCanvas.renderAll();
+      setDisplayScale(scale);
     });
 
     observer.observe(containerRef.current);
 
     return () => {
       observer.disconnect();
-      if (canvas) {
-        canvas.dispose();
+      if (fabricCanvasRef.current) {
+        fabricCanvasRef.current.dispose();
       }
       fabricCanvasRef.current = null;
     };
-  }, [imageUrl, spacePressed]);
-
-  // Load and position watermark in original 1:1 coordinate space
-  const handleInitializeWatermark = async (
-    canvas: Canvas,
-    origWidth: number,
-    origHeight: number,
-    customUrl?: string
-  ) => {
-    setLogoError(null);
-    const logoUrl = customUrl || watermarkOptions.customLogoUrl || '/branding/thennakoon-tours-logo.png';
-
-    try {
-      const logoImg = await loadLogoImage(logoUrl);
-
-      // Remove existing watermark if present
-      if (watermarkFabricObjectRef.current) {
-        canvas.remove(watermarkFabricObjectRef.current);
-      }
-
-      // Calculate watermark coordinates directly in 1:1 original coordinate space
-      const { left, top, scale } = getWatermarkCoords(
-        logoImg.naturalWidth,
-        logoImg.naturalHeight,
-        origWidth,
-        origHeight,
-        { ...watermarkOptions, customLogoUrl: customUrl || watermarkOptions.customLogoUrl }
-      );
-
-      const wm = new FabricImage(logoImg, {
-        left,
-        top,
-        scaleX: scale,
-        scaleY: scale,
-        opacity: watermarkOptions.opacity,
-        visible: watermarkOptions.visible && !isPreviewActive,
-        selectable: true,
-        hasControls: true,
-        hasBorders: true,
-        transparentCorners: false,
-        cornerColor: '#8B0000',
-        cornerStrokeColor: '#FFFFFF',
-        borderColor: '#8B0000',
-        cornerSize: Math.max(12, Math.round(12 / displayScale)), // scale control handle for usability
-      });
-
-      (wm as any).isWatermark = true;
-      watermarkFabricObjectRef.current = wm;
-      canvas.add(wm);
-      canvas.bringObjectToFront(wm);
-      canvas.renderAll();
-    } catch (err) {
-      console.warn('Default company logo failed to load:', err);
-      setLogoError('Logo file not found. You can upload a logo manually.');
-      if (watermarkFabricObjectRef.current) {
-        canvas.remove(watermarkFabricObjectRef.current);
-        watermarkFabricObjectRef.current = null;
-      }
-    }
-  };
+  }, [imageUrl]);
 
   // Sync selection change to settings panel
   const handleSelectionChange = (target: any) => {
@@ -672,7 +631,6 @@ export default function BrandingEditorClient() {
 
     if (target && target.isNamePlate) {
       const options = target.plateOptions;
-      setSelectedPlateMode(target.plateMode || 'standard');
       
       setPlateOptions({
         text: options.text,
@@ -686,20 +644,9 @@ export default function BrandingEditorClient() {
         shadow: options.shadow,
       });
 
-      // Focus tab
       setActiveTab('plates');
-
-      // Initialize perspective handles if in perspective mode
-      if (target.plateMode === 'perspective') {
-        renderPerspectiveHandles(fabricCanvasRef.current!, target);
-      } else {
-        clearPerspectiveHandles(fabricCanvasRef.current!);
-      }
     } else if (target && target.isWatermark) {
       setActiveTab('watermark');
-      clearPerspectiveHandles(fabricCanvasRef.current!);
-    } else {
-      clearPerspectiveHandles(fabricCanvasRef.current!);
     }
   };
 
@@ -712,12 +659,10 @@ export default function BrandingEditorClient() {
 
     const plate = createNamePlate(plateOptions, imageMetadata.width, imageMetadata.height);
     
-    // Add custom identification tags
     const id = 'plate_' + Math.random().toString(36).substring(2, 11);
     (plate as any).id = id;
     (plate as any).plateMode = 'standard';
     (plate as any).plateOptions = { ...plateOptions };
-    (plate as any).corners = null;
 
     canvas.add(plate);
     canvas.setActiveObject(plate);
@@ -729,28 +674,14 @@ export default function BrandingEditorClient() {
   // Action: Edit plate options
   const handlePlateOptionsChange = (updated: Partial<PlateOptions>) => {
     const canvas = fabricCanvasRef.current;
-    if (!canvas || !imageMetadata) return;
+    if (!canvas) return;
 
     setPlateOptions((prev) => {
       const next = { ...prev, ...updated };
 
       if (activeObject && activeObject.isNamePlate) {
         activeObject.plateOptions = { ...activeObject.plateOptions, ...updated };
-
-        if (activeObject.plateMode === 'standard') {
-          // Standard Group Update
-          updatePlateProperties(activeObject, next);
-        } else {
-          // Perspective Warp Update
-          const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-          const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
-          activeObject.setElement(warpedCanvas);
-          
-          if (updated.opacity !== undefined) {
-            activeObject.set({ opacity: updated.opacity });
-          }
-        }
-        
+        updatePlateProperties(activeObject, next);
         canvas.renderAll();
       }
 
@@ -823,7 +754,7 @@ export default function BrandingEditorClient() {
       visible: true,
     }));
 
-    handleInitializeWatermark(canvas, imageMetadata.width, imageMetadata.height, url).then(() => {
+    addDefaultWatermark(canvas, imageMetadata.width, imageMetadata.height, url).then(() => {
       pushToHistory();
     });
   };
@@ -841,339 +772,9 @@ export default function BrandingEditorClient() {
       customLogoUrl: null,
     }));
 
-    handleInitializeWatermark(canvas, imageMetadata.width, imageMetadata.height, '/branding/thennakoon-tours-logo.png').then(() => {
+    addDefaultWatermark(canvas, imageMetadata.width, imageMetadata.height, '/branding/thennakoon-tours-logo.png').then(() => {
       pushToHistory();
     });
-  };
-
-  // Switch Selected Plate Mode (Standard Flat vs 4-Corner Warp)
-  const handlePlateModeChange = (mode: PlateMode) => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas || !activeObject || !activeObject.isNamePlate || !imageMetadata) return;
-
-    if (mode === activeObject.plateMode) return;
-
-    isSyncingRef.current = true;
-
-    try {
-      if (mode === 'perspective') {
-        // Switch to Perspective Warped Image
-        // 1. Calculate base dimensions of current flat plate group
-        const baseWidth = activeObject.width * activeObject.scaleX;
-        const baseHeight = activeObject.height * activeObject.scaleY;
-        const cx = activeObject.left;
-        const cy = activeObject.top;
-
-        // 2. Rotate corners to compute absolute 4 coordinates in original-space
-        const rad = (activeObject.angle || 0) * Math.PI / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-
-        const getRotatedPoint = (rx: number, ry: number) => ({
-          x: cx + rx * cos - ry * sin,
-          y: cy + rx * sin + ry * cos,
-        });
-
-        const initialCorners: Point[] = [
-          getRotatedPoint(-baseWidth / 2, -baseHeight / 2), // TL
-          getRotatedPoint(baseWidth / 2, -baseHeight / 2),  // TR
-          getRotatedPoint(baseWidth / 2, baseHeight / 2),   // BR
-          getRotatedPoint(-baseWidth / 2, baseHeight / 2),  // BL
-        ];
-
-        // 3. Render flat plate design and warp
-        const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-        const warpedCanvas = warpCanvasPerspective(flatCanvas, initialCorners);
-
-        // 4. Create warped FabricImage
-        const warpedImageObj = new FabricImage(warpedCanvas, {
-          opacity: activeObject.opacity,
-          selectable: true,
-          hasControls: false, // drag is supported, corner resizing is done via handle handles
-          hasBorders: false,
-        });
-
-        // Copy plate metadata
-        const id = activeObject.id;
-        const options = { ...activeObject.plateOptions };
-        
-        (warpedImageObj as any).id = id;
-        (warpedImageObj as any).isNamePlate = true;
-        (warpedImageObj as any).plateMode = 'perspective';
-        (warpedImageObj as any).plateOptions = options;
-        (warpedImageObj as any).corners = initialCorners;
-
-        // Track drag delta to move all corners together
-        (warpedImageObj as any).lastLeft = warpedImageObj.left;
-        (warpedImageObj as any).lastTop = warpedImageObj.top;
-
-        warpedImageObj.on('moving', () => {
-          const dx = warpedImageObj.left - (warpedImageObj as any).lastLeft;
-          const dy = warpedImageObj.top - (warpedImageObj as any).lastTop;
-          
-          (warpedImageObj as any).lastLeft = warpedImageObj.left;
-          (warpedImageObj as any).lastTop = warpedImageObj.top;
-
-          // Shift corners
-          (warpedImageObj as any).corners = (warpedImageObj as any).corners.map((p: Point) => ({
-            x: p.x + dx,
-            y: p.y + dy,
-          }));
-
-          // Synchronize handles
-          handlesRef.current.forEach((h: any) => {
-            const corner = (warpedImageObj as any).corners[h.cornerIndex];
-            h.set({ left: corner.x, top: corner.y });
-            h.setCoords();
-          });
-        });
-
-        // Remove old group, add new warped image
-        canvas.remove(activeObject);
-        canvas.add(warpedImageObj);
-        canvas.setActiveObject(warpedImageObj);
-        
-        setSelectedPlateMode('perspective');
-        setActiveObject(warpedImageObj);
-
-        // Draw handles
-        renderPerspectiveHandles(canvas, warpedImageObj);
-      } else {
-        // Switch back to Standard flat group
-        clearPerspectiveHandles(canvas);
-
-        const newPlate = createNamePlate(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-        
-        // Compute center point of corners
-        const corners = activeObject.corners as Point[];
-        const cx = corners.reduce((sum, p) => sum + p.x, 0) / 4;
-        const cy = corners.reduce((sum, p) => sum + p.y, 0) / 4;
-
-        // Recreate flat
-        const id = activeObject.id;
-        const options = { ...activeObject.plateOptions };
-        
-        (newPlate as any).id = id;
-        (newPlate as any).isNamePlate = true;
-        (newPlate as any).plateMode = 'standard';
-        (newPlate as any).plateOptions = options;
-        (newPlate as any).corners = null;
-
-        newPlate.set({
-          left: cx,
-          top: cy,
-          angle: 0,
-          opacity: activeObject.opacity,
-        });
-
-        canvas.remove(activeObject);
-        canvas.add(newPlate);
-        canvas.setActiveObject(newPlate);
-
-        setSelectedPlateMode('standard');
-        setActiveObject(newPlate);
-      }
-
-      canvas.renderAll();
-      pushToHistory();
-    } catch (err) {
-      console.error('Error switching plate mode:', err);
-    } finally {
-      isSyncingRef.current = false;
-    }
-  };
-
-  // Generate corner handle points for Perspective Warping
-  const renderPerspectiveHandles = (canvas: Canvas, plateObj: any) => {
-    clearPerspectiveHandles(canvas);
-
-    const corners = plateObj.corners as Point[];
-    if (!corners) return;
-
-    const handles: Circle[] = [];
-
-    corners.forEach((pt, index) => {
-      // Calculate handle size scaled so it remains readable regardless of zoom
-      const handleRadius = Math.max(12, Math.round(12 / (displayScale * zoomLevel)));
-
-      const handle = new Circle({
-        left: pt.x,
-        top: pt.y,
-        radius: handleRadius,
-        fill: '#8B0000',
-        stroke: '#FFFFFF',
-        strokeWidth: Math.max(2, Math.round(2 / (displayScale * zoomLevel))),
-        originX: 'center',
-        originY: 'center',
-        hasControls: false,
-        hasBorders: false,
-        selectable: true,
-      });
-
-      (handle as any).isPerspectiveHandle = true;
-      (handle as any).cornerIndex = index;
-      (handle as any).plateId = plateObj.id;
-
-      // Draggable listener for handles
-      handle.on('moving', () => {
-        const nextX = handle.left;
-        const nextY = handle.top;
-
-        // Check if movement creates self-intersection (must remain convex)
-        const proposedCorners = corners.map((p, idx) =>
-          idx === index ? { x: nextX, y: nextY } : { ...p }
-        );
-
-        if (isConvex(proposedCorners)) {
-          corners[index].x = nextX;
-          corners[index].y = nextY;
-
-          // Re-warp flat design
-          const flatCanvas = renderFlatPlateCanvas(plateObj.plateOptions, bgImageElementRef.current!.naturalWidth, bgImageElementRef.current!.naturalHeight);
-          const warpedCanvas = warpCanvasPerspective(flatCanvas, corners);
-          plateObj.setElement(warpedCanvas);
-
-          // Adjust relative bounding box position
-          const minX = Math.min(...corners.map((p) => p.x));
-          const minY = Math.min(...corners.map((p) => p.y));
-          
-          plateObj.set({ left: minX, top: minY });
-          plateObj.setCoords();
-          (plateObj as any).lastLeft = minX;
-          (plateObj as any).lastTop = minY;
-
-          canvas.renderAll();
-        } else {
-          // Revert coordinate if non-convex
-          handle.set({ left: corners[index].x, top: corners[index].y });
-          handle.setCoords();
-        }
-      });
-
-      // Save state when drag finished
-      handle.on('modified', () => {
-        pushToHistory();
-      });
-
-      canvas.add(handle);
-      canvas.bringObjectToFront(handle);
-      handles.push(handle);
-    });
-
-    handlesRef.current = handles;
-    canvas.renderAll();
-  };
-
-  const clearPerspectiveHandles = (canvas: Canvas) => {
-    const handles = canvas.getObjects().filter((obj: any) => obj.isPerspectiveHandle);
-    handles.forEach((h) => canvas.remove(h));
-    handlesRef.current = [];
-  };
-
-  // Perspective Actions: Copy Previous Shape
-  const handleCopyPreviousShape = () => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas || !activeObject || !activeObject.isNamePlate || activeObject.plateMode !== 'perspective') return;
-
-    // Find another perspective plate
-    const other = canvas.getObjects().find(
-      (obj: any) => obj.isNamePlate && obj.plateMode === 'perspective' && obj.id !== activeObject.id
-    ) as any;
-
-    if (other && other.corners && other.corners.length === 4) {
-      // Find delta translation to center new shape over this plate
-      const otherCenter = {
-        x: other.corners.reduce((s: number, p: Point) => s + p.x, 0) / 4,
-        y: other.corners.reduce((s: number, p: Point) => s + p.y, 0) / 4,
-      };
-
-      const myCenter = {
-        x: activeObject.corners.reduce((s: number, p: Point) => s + p.x, 0) / 4,
-        y: activeObject.corners.reduce((s: number, p: Point) => s + p.y, 0) / 4,
-      };
-
-      const dx = myCenter.x - otherCenter.x;
-      const dy = myCenter.y - otherCenter.y;
-
-      // Copy corners shifted by center delta
-      activeObject.corners = other.corners.map((p: Point) => ({
-        x: p.x + dx,
-        y: p.y + dy,
-      }));
-
-      // Render warp
-      const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, bgImageElementRef.current!.naturalWidth, bgImageElementRef.current!.naturalHeight);
-      const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
-      activeObject.setElement(warpedCanvas);
-
-      const minX = Math.min(...activeObject.corners.map((p: any) => p.x));
-      const minY = Math.min(...activeObject.corners.map((p: any) => p.y));
-      activeObject.set({ left: minX, top: minY });
-      activeObject.setCoords();
-      
-      activeObject.lastLeft = minX;
-      activeObject.lastTop = minY;
-
-      // Redraw handles
-      renderPerspectiveHandles(canvas, activeObject);
-      pushToHistory();
-    }
-  };
-
-  // Zoom / Viewport Panning Controls (Part 6)
-  const handleZoom = (type: 'in' | 'out' | 'fit' | '100%') => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas) return;
-
-    let newZoom = zoomLevel;
-    const vpt = (canvas.viewportTransform ? [...canvas.viewportTransform] : [1, 0, 0, 1, 0, 0]) as [number, number, number, number, number, number];
-
-    if (type === 'in') {
-      newZoom = Math.min(5.0, zoomLevel * 1.25);
-      const zoomFactor = displayScale * newZoom;
-      vpt[0] = zoomFactor;
-      vpt[3] = zoomFactor;
-      // Zoom from center
-      vpt[4] = (canvas.width * displayScale / 2) * (1 - newZoom);
-      vpt[5] = (canvas.height * displayScale / 2) * (1 - newZoom);
-    } else if (type === 'out') {
-      newZoom = Math.max(0.2, zoomLevel / 1.25);
-      const zoomFactor = displayScale * newZoom;
-      vpt[0] = zoomFactor;
-      vpt[3] = zoomFactor;
-      vpt[4] = (canvas.width * displayScale / 2) * (1 - newZoom);
-      vpt[5] = (canvas.height * displayScale / 2) * (1 - newZoom);
-    } else if (type === '100%') {
-      newZoom = 1.0 / displayScale; // renders exactly 1:1 original-to-screen pixels
-      vpt[0] = 1.0;
-      vpt[3] = 1.0;
-      vpt[4] = (canvas.width * displayScale - canvas.width) / 2;
-      vpt[5] = (canvas.height * displayScale - canvas.height) / 2;
-    } else {
-      // Fit to Screen
-      newZoom = 1.0;
-      vpt[0] = displayScale;
-      vpt[3] = displayScale;
-      vpt[4] = 0;
-      vpt[5] = 0;
-    }
-
-    setZoomLevel(newZoom);
-    canvas.viewportTransform = vpt;
-
-    // Re-scale handle handle sizes on zoom so they remain clickable
-    canvas.getObjects().forEach((obj: any) => {
-      if (obj.isPerspectiveHandle) {
-        const handleRadius = Math.max(12, Math.round(12 / (displayScale * newZoom)));
-        obj.set({
-          radius: handleRadius,
-          strokeWidth: Math.max(2, Math.round(2 / (displayScale * newZoom))),
-        });
-        obj.setCoords();
-      }
-    });
-
-    canvas.requestRenderAll();
   };
 
   // Before / After Preview Toggle (Part 12)
@@ -1183,7 +784,7 @@ export default function BrandingEditorClient() {
 
     setIsPreviewActive(active);
     canvas.discardActiveObject();
-    clearPerspectiveHandles(canvas);
+    canvas.renderAll();
 
     canvas.getObjects().forEach((obj: any) => {
       if (obj.isNamePlate) {
@@ -1213,11 +814,7 @@ export default function BrandingEditorClient() {
     if (active) {
       if ((active as any).isWatermark) {
         handleWatermarkOptionsChange({ visible: false });
-      } else if ((active as any).isPerspectiveHandle) {
-        // Can't delete perspective handles
-        return;
       } else {
-        clearPerspectiveHandles(canvas);
         canvas.remove(active);
         canvas.discardActiveObject();
         canvas.renderAll();
@@ -1233,12 +830,9 @@ export default function BrandingEditorClient() {
 
     isSyncingRef.current = true;
 
-    // 1. Remove all plates and handles
-    clearPerspectiveHandles(canvas);
     const plates = canvas.getObjects().filter((obj: any) => obj.isNamePlate);
     plates.forEach((p) => canvas.remove(p));
 
-    // 2. Restore Default Watermark (opacity 100%, bottom-left, preset mode)
     setWatermarkOptions({
       visible: true,
       opacity: 1.0,
@@ -1248,9 +842,7 @@ export default function BrandingEditorClient() {
     });
     setIsWatermarkManual(false);
 
-    handleInitializeWatermark(canvas, imageMetadata.width, imageMetadata.height).then(() => {
-      // 3. Reset Zoom to fit
-      handleZoom('fit');
+    addDefaultWatermark(canvas, imageMetadata.width, imageMetadata.height).then(() => {
       setIsConfirmResetOpen(false);
       isSyncingRef.current = false;
       pushToHistory();
@@ -1297,86 +889,31 @@ export default function BrandingEditorClient() {
         const step = e.shiftKey ? 10 : 1;
         let moved = false;
 
-        if (activeObj.isPerspectiveHandle) {
-          // Move perspective corner handle
-          const index = activeObj.cornerIndex;
-          const plate = canvas.getObjects().find((obj: any) => obj.isNamePlate && obj.id === activeObj.plateId) as any;
-          if (plate && plate.corners) {
-            const nextX = activeObj.left + (e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0);
-            const nextY = activeObj.top + (e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0);
-
-            const proposed = plate.corners.map((p: Point, idx: number) =>
-              idx === index ? { x: nextX, y: nextY } : { ...p }
-            );
-
-            if (isConvex(proposed)) {
-              activeObj.set({ left: nextX, top: nextY });
-              plate.corners[index].x = nextX;
-              plate.corners[index].y = nextY;
-
-              const flatCanvas = renderFlatPlateCanvas(plate.plateOptions, bgImageElementRef.current!.naturalWidth, bgImageElementRef.current!.naturalHeight);
-              const warpedCanvas = warpCanvasPerspective(flatCanvas, plate.corners);
-              plate.setElement(warpedCanvas);
-
-              const minX = Math.min(...plate.corners.map((p: any) => p.x));
-              const minY = Math.min(...plate.corners.map((p: any) => p.y));
-              plate.set({ left: minX, top: minY });
-              plate.setCoords();
-              plate.lastLeft = minX;
-              plate.lastTop = minY;
-
-              moved = true;
-            }
-          }
-        } else {
-          // Standard Plate / Watermark nudge (natively in 1:1 original pixels!)
-          switch (e.key) {
-            case 'ArrowUp':
-              e.preventDefault();
-              activeObj.set({ top: (activeObj.top || 0) - step });
-              moved = true;
-              break;
-            case 'ArrowDown':
-              e.preventDefault();
-              activeObj.set({ top: (activeObj.top || 0) + step });
-              moved = true;
-              break;
-            case 'ArrowLeft':
-              e.preventDefault();
-              activeObj.set({ left: (activeObj.left || 0) - step });
-              moved = true;
-              break;
-            case 'ArrowRight':
-              e.preventDefault();
-              activeObj.set({ left: (activeObj.left || 0) + step });
-              moved = true;
-              break;
-          }
-          
-          if (moved) {
-            if (activeObj.isNamePlate && activeObj.plateMode === 'perspective') {
-              // Shift all corners
-              const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
-              const dy = e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0;
-              activeObj.corners = activeObj.corners.map((p: Point) => ({
-                x: p.x + dx,
-                y: p.y + dy,
-              }));
-              activeObj.lastLeft = activeObj.left;
-              activeObj.lastTop = activeObj.top;
-
-              // Move handles in sync
-              handlesRef.current.forEach((h: any) => {
-                const pt = activeObj.corners[h.cornerIndex];
-                h.set({ left: pt.x, top: pt.y });
-                h.setCoords();
-              });
-            }
-            activeObj.setCoords();
-          }
+        switch (e.key) {
+          case 'ArrowUp':
+            e.preventDefault();
+            activeObj.set({ top: (activeObj.top || 0) - step });
+            moved = true;
+            break;
+          case 'ArrowDown':
+            e.preventDefault();
+            activeObj.set({ top: (activeObj.top || 0) + step });
+            moved = true;
+            break;
+          case 'ArrowLeft':
+            e.preventDefault();
+            activeObj.set({ left: (activeObj.left || 0) - step });
+            moved = true;
+            break;
+          case 'ArrowRight':
+            e.preventDefault();
+            activeObj.set({ left: (activeObj.left || 0) + step });
+            moved = true;
+            break;
         }
-
+        
         if (moved) {
+          activeObj.setCoords();
           canvas.renderAll();
         }
       }
@@ -1404,7 +941,7 @@ export default function BrandingEditorClient() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [undoStack, redoStack, activeObject, displayScale, zoomLevel, isPreviewActive]);
+  }, [undoStack, redoStack, activeObject, isPreviewActive]);
 
   // High-Resolution Export Execution
   const handleExportImage = async () => {
@@ -1414,39 +951,41 @@ export default function BrandingEditorClient() {
     setIsExporting(true);
 
     try {
-      // Deselect and clear handles temporarily before exporting
-      canvas.discardActiveObject();
-      clearPerspectiveHandles(canvas);
-      canvas.renderAll();
+      let dataUrl: string | null = null;
 
-      const dataUrl = await generateExportDataUrl(canvas, bgImageElementRef.current, {
-        preset: exportPreset,
-        format: exportFormat,
-        quality: exportQuality,
-        fitMethod: exportFitMethod,
-        backgroundColor: exportBgColor,
-        watermarkOptions,
-        isWatermarkManual,
-        imageMetadata,
-      });
+      if (exportPreset === 'original') {
+        // Export directly from original size canvas (identity resolution)
+        dataUrl = exportOriginalImage();
+      } else {
+        // Social media exports (fit/fill) using offscreen canvas logic
+        canvas.discardActiveObject();
+        canvas.renderAll();
 
-      const link = document.createElement('a');
-      const ext = exportFormat === 'jpeg' ? 'jpg' : 'png';
-      const paddedNum = String(exportCount).padStart(3, '0');
-      
-      link.download = `Thennakoon-Tours-Branded-${paddedNum}.${ext}`;
-      link.href = dataUrl;
-      
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+        dataUrl = await generateExportDataUrl(canvas, bgImageElementRef.current, {
+          preset: exportPreset,
+          format: exportFormat,
+          quality: exportQuality,
+          fitMethod: exportFitMethod,
+          backgroundColor: exportBgColor,
+          watermarkOptions,
+          isWatermarkManual,
+          imageMetadata,
+        });
+      }
 
-      setExportCount((prev) => prev + 1);
+      if (dataUrl) {
+        const link = document.createElement('a');
+        const ext = exportFormat === 'jpeg' ? 'jpg' : 'png';
+        const paddedNum = String(exportCount).padStart(3, '0');
+        
+        link.download = `Thennakoon-Tours-Branded-${paddedNum}.${ext}`;
+        link.href = dataUrl;
+        
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
 
-      // Restore handles if a perspective plate was previously active
-      if (activeObject && activeObject.isNamePlate && activeObject.plateMode === 'perspective') {
-        canvas.setActiveObject(activeObject);
-        renderPerspectiveHandles(canvas, activeObject);
+        setExportCount((prev) => prev + 1);
       }
     } catch (err) {
       console.error('Export failed:', err);
@@ -1503,10 +1042,10 @@ export default function BrandingEditorClient() {
                   <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-850">
                     <h3 className="font-bold text-white flex items-center gap-2 mb-1.5">
                       <span className="w-5 h-5 rounded-full bg-red-950 border border-red-900 flex items-center justify-center text-xs font-mono text-red-400">1</span>
-                      Flat & Perspective Plates
+                      Branded Name Plates
                     </h3>
                     <p className="text-xs leading-relaxed text-neutral-400">
-                      Standard flat plates with rotation support, or use the <b>Perspective Mode</b> to stretch plate corners independently over angled number plates.
+                      Add a dark-red branded plate over original license plates. Customize text and size.
                     </p>
                   </div>
                   <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-850">
@@ -1538,7 +1077,6 @@ export default function BrandingEditorClient() {
               </div>
 
               {/* Editor Workspace Container */}
-              {/* Rectified container ensures aspect-ratio fitting and no oversized black padding */}
               <div
                 ref={containerRef}
                 className="flex-1 min-h-[350px] bg-neutral-900/60 border border-neutral-850 rounded-2xl flex items-center justify-center overflow-hidden p-4 relative group shadow-2xl"
@@ -1549,21 +1087,9 @@ export default function BrandingEditorClient() {
                     <span>Viewing Original Photo (Branding Hidden)</span>
                   </div>
                 )}
-                
-                {/* Spacebar Pan indicator */}
-                {spacePressed && (
-                  <div className="absolute bottom-4 right-4 z-10 bg-neutral-900/90 border border-neutral-850 px-3 py-1.5 rounded-lg text-xs text-neutral-300 flex items-center gap-2 shadow-md">
-                    <span>✋ Spacebar Hold: Drag to Pan Viewport</span>
-                  </div>
-                )}
 
-                {/* Fabric Canvas wrapping element */}
-                <div 
-                  className="relative border border-neutral-800 rounded shadow-md overflow-hidden bg-neutral-950 max-w-full max-h-full"
-                  style={{
-                    cursor: spacePressed ? 'grab' : 'default',
-                  }}
-                >
+                {/* Fabric Canvas wrapper - display width/height matches fitScale */}
+                <div className="relative border border-neutral-800 rounded shadow-md overflow-hidden bg-neutral-950 max-w-full max-h-full flex items-center justify-center">
                   <canvas ref={canvasElRef} />
                 </div>
               </div>
@@ -1574,14 +1100,14 @@ export default function BrandingEditorClient() {
                 canRedo={redoStack.length > 0}
                 onUndo={handleUndo}
                 onRedo={handleRedo}
-                onZoomIn={() => handleZoom('in')}
-                onZoomOut={() => handleZoom('out')}
-                onZoomFit={() => handleZoom('fit')}
+                onZoomIn={() => {}}
+                onZoomOut={() => {}}
+                onZoomFit={() => {}}
                 onDeleteSelected={handleDeleteSelected}
                 onReset={() => setIsConfirmResetOpen(true)}
                 onAddPlate={handleAddPlate}
                 hasSelection={activeObject !== null}
-                zoomLevel={zoomLevel}
+                zoomLevel={1}
               />
             </div>
           )}
@@ -1644,18 +1170,11 @@ export default function BrandingEditorClient() {
                 <div className="space-y-4">
                   <PlateSettings
                     options={plateOptions}
-                    plateMode={selectedPlateMode}
-                    onChangeMode={handlePlateModeChange}
-                    onResetPerspective={() => handlePlateModeChange('standard')}
-                    onCopyPreviousShape={handleCopyPreviousShape}
-                    hasOtherPerspectivePlates={
-                      fabricCanvasRef.current
-                        ? fabricCanvasRef.current.getObjects().some(
-                            (obj: any) =>
-                              obj.isNamePlate && obj.plateMode === 'perspective' && obj.id !== activeObject?.id
-                          )
-                        : false
-                    }
+                    plateMode="standard"
+                    onChangeMode={() => {}}
+                    onResetPerspective={() => {}}
+                    onCopyPreviousShape={() => {}}
+                    hasOtherPerspectivePlates={false}
                     onChange={handlePlateOptionsChange}
                     onApplyPreset={handleApplyPlatePreset}
                   />
