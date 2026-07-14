@@ -1,14 +1,18 @@
 import React from 'react';
 import { PlateOptions, PLATE_PRESETS, PlatePreset, PlateMode } from '../types';
-import { Type, Layers, RefreshCw, Palette, Sliders, Maximize, Move, HelpCircle } from 'lucide-react';
+import { Type, RefreshCw, Palette, Maximize, Move, HelpCircle, Copy, RotateCcw } from 'lucide-react';
 
 interface PlateSettingsProps {
   options: PlateOptions;
   plateMode: PlateMode;
+  isAdjustingPerspective: boolean;
   onChangeMode: (mode: PlateMode) => void;
-  onResetPerspective: () => void;
+  onToggleAdjustPerspective: () => void;
+  onApplyAdjust: () => void;
+  onCancelAdjust: () => void;
+  onResetToRectangle: () => void;
   onCopyPreviousShape: () => void;
-  hasOtherPerspectivePlates: boolean;
+  hasSavedShape: boolean;
   onChange: (options: Partial<PlateOptions>) => void;
   onApplyPreset: (preset: PlatePreset) => void;
 }
@@ -16,10 +20,14 @@ interface PlateSettingsProps {
 export default function PlateSettings({
   options,
   plateMode,
+  isAdjustingPerspective,
   onChangeMode,
-  onResetPerspective,
+  onToggleAdjustPerspective,
+  onApplyAdjust,
+  onCancelAdjust,
+  onResetToRectangle,
   onCopyPreviousShape,
-  hasOtherPerspectivePlates,
+  hasSavedShape,
   onChange,
   onApplyPreset,
 }: PlateSettingsProps) {
@@ -49,7 +57,111 @@ export default function PlateSettings({
         </h3>
       </div>
 
+      {/* Editing Mode Selection */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-semibold text-neutral-400">Editing Mode</label>
+        <div className="grid grid-cols-2 gap-2 bg-neutral-950 p-1 rounded-lg border border-neutral-850">
+          <button
+            type="button"
+            onClick={() => onChangeMode('standard')}
+            className={`py-1.5 px-3 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5
+              ${
+                plateMode === 'standard'
+                  ? 'bg-neutral-800 text-white shadow-sm'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+          >
+            <Move className="w-3.5 h-3.5" />
+            Standard
+          </button>
+          <button
+            type="button"
+            onClick={() => onChangeMode('perspective')}
+            className={`py-1.5 px-3 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5
+              ${
+                plateMode === 'perspective'
+                  ? 'bg-red-950 text-red-400 border border-red-900/40 shadow-sm'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+          >
+            <Maximize className="w-3.5 h-3.5" />
+            Perspective
+          </button>
+        </div>
+      </div>
 
+      {/* Mode Specific Controls */}
+      {plateMode === 'perspective' && (
+        <div className="space-y-3 bg-neutral-950/40 border border-neutral-850/60 p-3.5 rounded-xl animate-fade-in">
+          <div className="flex items-center gap-2 text-red-400">
+            <Maximize className="w-4 h-4 shrink-0" />
+            <h4 className="text-xs font-bold uppercase tracking-wider">Perspective Adjustment</h4>
+          </div>
+          
+          <p className="text-[11px] text-neutral-400 leading-relaxed">
+            Warp this name plate over angled number plates. Corner handles can be adjusted in **Adjust Mode**.
+          </p>
+
+          <div className="space-y-2 pt-1">
+            {!isAdjustingPerspective ? (
+              <button
+                type="button"
+                onClick={onToggleAdjustPerspective}
+                className="w-full py-2 px-3 text-xs font-bold rounded-lg bg-red-700 hover:bg-red-650 text-white transition-all cursor-pointer shadow-md flex items-center justify-center gap-1.5"
+              >
+                <Maximize className="w-3.5 h-3.5" />
+                Adjust Corners
+              </button>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={onApplyAdjust}
+                  className="py-2 px-3 text-xs font-bold rounded-lg bg-green-700 hover:bg-green-650 text-white transition-all cursor-pointer shadow-md"
+                >
+                  Apply
+                </button>
+                <button
+                  type="button"
+                  onClick={onCancelAdjust}
+                  className="py-2 px-3 text-xs font-bold rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={onResetToRectangle}
+              className="w-full py-1.5 px-3 text-xs font-semibold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Reset to Rectangle
+            </button>
+            
+            <button
+              type="button"
+              onClick={onCopyPreviousShape}
+              disabled={!hasSavedShape}
+              className="w-full py-1.5 px-3 text-xs font-semibold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 disabled:opacity-30 disabled:hover:bg-neutral-900 disabled:hover:text-neutral-500 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              title="Copy quadrilateral shape from another perspective plate"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              Copy Previous Shape
+            </button>
+          </div>
+
+          <div className="border-t border-neutral-850 pt-2.5 space-y-1.5 text-[10px] text-neutral-500 leading-relaxed">
+            <span className="font-bold text-neutral-400 block uppercase tracking-widest flex items-center gap-1">
+              <HelpCircle className="w-3 h-3 text-red-500" /> Shortcuts & Instructions
+            </span>
+            <p>• Click **Adjust Corners** to edit individual points.</p>
+            <p>• Drag handles or use **Arrow Keys** (Shift for 10px) to nudge points.</p>
+            <p>• Drag inside the plate to move it as a single unit.</p>
+          </div>
+        </div>
+      )}
 
       {/* Style Presets */}
       <div className="space-y-2 border-t border-neutral-800 pt-3">
