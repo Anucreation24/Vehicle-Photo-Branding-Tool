@@ -140,6 +140,30 @@ export default function BrandingEditorClient() {
   const [redoStack, setRedoStack] = useState<SavedCanvasState[]>([]);
   const isSyncingRef = useRef(false);
 
+  // ==================================================
+  // 8. DEVELOPMENT SAFETY INVARIANT ASSERTION
+  // ==================================================
+  const assertPlateVisible = (plate: any) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !plate) return;
+    if (!plate.visible || plate.opacity <= 0 || !canvas.contains(plate)) {
+      console.error('Perspective plate visibility invariant failed', {
+        id: plate.id,
+        visible: plate.visible,
+        opacity: plate.opacity,
+        inCanvas: canvas.contains(plate),
+      });
+      plate.set({
+        visible: true,
+        opacity: plate.plateOptions?.opacity ?? 1.0,
+      });
+      if (!canvas.contains(plate)) {
+        canvas.add(plate);
+      }
+      canvas.requestRenderAll();
+    }
+  };
+
   // Local Session Perspective Shape Persistence
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -198,15 +222,14 @@ export default function BrandingEditorClient() {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return null;
 
-    // Filter to standard plate groups currently on canvas
-    const standardPlates = canvas.getObjects()
-      .filter((obj: any) => obj.isNamePlate && obj.plateMode === 'standard')
+    const plates = canvas.getObjects()
+      .filter((obj: any) => obj.isNamePlate)
       .map((obj: any) => {
         return {
           id: obj.id,
-          plateMode: 'standard' as PlateMode,
+          plateMode: obj.plateMode || 'standard',
           plateOptions: { ...obj.plateOptions },
-          corners: null,
+          corners: obj.corners ? obj.corners.map((p: any) => ({ x: p.x, y: p.y })) : null,
           left: obj.left,
           top: obj.top,
           scaleX: obj.scaleX,
@@ -216,28 +239,9 @@ export default function BrandingEditorClient() {
         };
       });
 
-    // Filter to perspective preview image plates on canvas
-    const perspectivePlates = canvas.getObjects()
-      .filter((obj: any) => obj.isNamePlate && obj.plateMode === 'perspective')
-      .map((obj: any) => {
-        const std = obj.standardPlate;
-        return {
-          id: std ? std.id : obj.id.replace('_preview', ''),
-          plateMode: 'perspective' as PlateMode,
-          plateOptions: { ...obj.plateOptions },
-          corners: obj.corners ? obj.corners.map((p: any) => ({ x: p.x, y: p.y })) : null,
-          left: obj.left,
-          top: obj.top,
-          scaleX: 1,
-          scaleY: 1,
-          angle: 0,
-          opacity: obj.opacity || 1.0,
-        };
-      });
-
     const wm = watermarkFabricObjectRef.current;
     return {
-      plates: [...standardPlates, ...perspectivePlates],
+      plates,
       watermark: {
         visible: watermarkOptions.visible,
         opacity: watermarkOptions.opacity,
@@ -306,22 +310,17 @@ export default function BrandingEditorClient() {
       }
 
       // 2. Name Plates Restoration
-      // Clean all existing name plates (both standard groups and perspective previews)
+      // Clean all existing name plates
       const existingPlates = canvas.getObjects().filter((obj: any) => obj.isNamePlate);
       existingPlates.forEach((p) => canvas.remove(p));
 
-      // Recreate them from snapshot
+      // Recreate them from snapshot as single persistent objects
       for (const plateState of snap.plates) {
-        // Create canonical standard plate first
-        const standardPlate = createNamePlate(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
-        (standardPlate as any).id = plateState.id;
-        (standardPlate as any).isNamePlate = true;
-        (standardPlate as any).plateMode = 'standard';
-        (standardPlate as any).plateOptions = { ...plateState.plateOptions };
+        let plateObj: FabricImage;
 
         if (plateState.plateMode === 'standard') {
-          // Add standard plate visible
-          standardPlate.set({
+          const flatCanvas = renderFlatPlateCanvas(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
+          plateObj = new FabricImage(flatCanvas, {
             left: plateState.left,
             top: plateState.top,
             scaleX: plateState.scaleX,
@@ -331,70 +330,60 @@ export default function BrandingEditorClient() {
             visible: !isPreviewActive,
             selectable: !isPreviewActive,
             evented: !isPreviewActive,
+            transparentCorners: false,
+            cornerColor: '#8B0000',
+            cornerStrokeColor: '#FFFFFF',
+            borderColor: '#8B0000',
+            cornerSize: 12,
           });
-          canvas.add(standardPlate);
         } else {
-          // Add standard plate invisible (Section 3: Preserved Canonical Source Object)
-          standardPlate.set({
-            left: plateState.left,
-            top: plateState.top,
-            scaleX: plateState.scaleX,
-            scaleY: plateState.scaleY,
-            angle: plateState.angle,
-            opacity: plateState.opacity,
-            visible: false,
-            selectable: false,
-            evented: false,
-          });
-          canvas.add(standardPlate);
-
-          // Re-render warped image preview
           const flatCanvas = renderFlatPlateCanvas(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
           const warpedCanvas = warpCanvasPerspective(flatCanvas, plateState.corners!);
           
           const minX = Math.min(...plateState.corners!.map((p) => p.x));
           const minY = Math.min(...plateState.corners!.map((p) => p.y));
 
-          const previewPlate = new FabricImage(warpedCanvas, {
+          plateObj = new FabricImage(warpedCanvas, {
             left: minX,
             top: minY,
             opacity: plateState.opacity,
             selectable: !isPreviewActive,
             evented: !isPreviewActive,
             hasControls: false,
-            hasBorders: false,
+            hasBorders: true,
             originX: 'left',
             originY: 'top',
             visible: !isPreviewActive,
           });
 
-          (previewPlate as any).id = plateState.id + '_preview';
-          (previewPlate as any).isNamePlate = true;
-          (previewPlate as any).plateMode = 'perspective';
-          (previewPlate as any).plateOptions = { ...plateState.plateOptions };
-          (previewPlate as any).corners = plateState.corners!.map((p) => ({ ...p }));
-          (previewPlate as any).standardPlate = standardPlate;
-          (previewPlate as any).lastLeft = minX;
-          (previewPlate as any).lastTop = minY;
+          (plateObj as any).corners = plateState.corners!.map((p) => ({ ...p }));
+          (plateObj as any).lastLeft = minX;
+          (plateObj as any).lastTop = minY;
 
-          // Move listener
-          previewPlate.on('moving', () => {
-            const dx = previewPlate.left - (previewPlate as any).lastLeft;
-            const dy = previewPlate.top - (previewPlate as any).lastTop;
-            (previewPlate as any).lastLeft = previewPlate.left;
-            (previewPlate as any).lastTop = previewPlate.top;
-            (previewPlate as any).corners = (previewPlate as any).corners.map((p: Point) => ({
+          // Re-bind moving listeners
+          plateObj.on('moving', () => {
+            const dx = plateObj.left - (plateObj as any).lastLeft;
+            const dy = plateObj.top - (plateObj as any).lastTop;
+            (plateObj as any).lastLeft = plateObj.left;
+            (plateObj as any).top = plateObj.top;
+            (plateObj as any).corners = (plateObj as any).corners.map((p: Point) => ({
               x: p.x + dx,
               y: p.y + dy,
             }));
           });
 
-          previewPlate.on('modified', () => {
+          plateObj.on('modified', () => {
             pushToHistory();
           });
-
-          canvas.add(previewPlate);
         }
+
+        (plateObj as any).id = plateState.id;
+        (plateObj as any).isNamePlate = true;
+        (plateObj as any).plateMode = plateState.plateMode;
+        (plateObj as any).plateOptions = { ...plateState.plateOptions };
+
+        canvas.add(plateObj);
+        assertPlateVisible(plateObj);
       }
 
       // Re-trigger selection properties update
@@ -621,7 +610,7 @@ export default function BrandingEditorClient() {
     return dataUrl;
   };
 
-  // Main Canvas Setup Lifecycle Hook
+  // Main Canvas Setup Lifecycle Hook (Non-destructive: initialization runs strictly once!)
   useEffect(() => {
     if (!imageUrl || !canvasElRef.current || !containerRef.current) return;
 
@@ -649,7 +638,7 @@ export default function BrandingEditorClient() {
       );
       setDisplayScale(fitScale);
 
-      // Diagnostics Log (Section 10)
+      // Diagnostics Log
       console.log('Canvas Diagnostics:', {
         naturalImageWidth: originalWidth,
         naturalImageHeight: originalHeight,
@@ -723,9 +712,9 @@ export default function BrandingEditorClient() {
       }
       fabricCanvasRef.current = null;
     };
-  }, [imageUrl, editorZoom]);
+  }, [imageUrl]); // Excluded editorZoom to prevent canvas disposes during zooming operations (Section 10)
 
-  // Sync selection change to settings panel
+  // Sync selection change to settings panel (Section 2: Selection must NOT trigger Perspective conversion!)
   const handleSelectionChange = (target: any) => {
     setActiveObject(target);
 
@@ -747,7 +736,10 @@ export default function BrandingEditorClient() {
 
       setActiveTab('plates');
 
-      // Clear handles if another plate is selected, or if Standard Mode
+      // Sync and assert plate visibility remains true (Section 1 & 8)
+      assertPlateVisible(target);
+
+      // Re-draw handles only if adjusting perspective previously
       if (target.plateMode === 'perspective' && isAdjustingPerspective) {
         renderPerspectiveHandles(fabricCanvasRef.current!, target);
       } else {
@@ -773,17 +765,37 @@ export default function BrandingEditorClient() {
 
     if (isPreviewActive) handleTogglePreview(false);
 
-    const plate = createNamePlate(plateOptions, imageMetadata.width, imageMetadata.height);
-    
+    const flatCanvas = renderFlatPlateCanvas(plateOptions, imageMetadata.width, imageMetadata.height);
     const id = 'plate_' + Math.random().toString(36).substring(2, 11);
+
+    const plate = new FabricImage(flatCanvas, {
+      left: imageMetadata.width / 2,
+      top: imageMetadata.height / 2,
+      originX: 'center',
+      originY: 'center',
+      opacity: plateOptions.opacity,
+      angle: plateOptions.rotation,
+      selectable: true,
+      hasControls: true,
+      hasBorders: true,
+      transparentCorners: false,
+      cornerColor: '#8B0000',
+      cornerStrokeColor: '#FFFFFF',
+      borderColor: '#8B0000',
+      cornerSize: 12,
+    });
+
     (plate as any).id = id;
+    (plate as any).isNamePlate = true;
     (plate as any).plateMode = 'standard';
     (plate as any).plateOptions = { ...plateOptions };
+    (plate as any).corners = null;
 
     canvas.add(plate);
     canvas.setActiveObject(plate);
     canvas.renderAll();
 
+    assertPlateVisible(plate);
     pushToHistory();
   };
 
@@ -799,27 +811,30 @@ export default function BrandingEditorClient() {
         activeObject.plateOptions = { ...activeObject.plateOptions, ...updated };
 
         if (activeObject.plateMode === 'standard') {
-          updatePlateProperties(activeObject, next);
-        } else {
-          // Perspective Warp Update
           const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-          const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
-          activeObject.setElement(warpedCanvas);
-
-          // Update linked canonical standard source plate properties in background (Section 3)
-          if (activeObject.standardPlate) {
-            activeObject.standardPlate.plateOptions = { ...activeObject.standardPlate.plateOptions, ...updated };
-            updatePlateProperties(activeObject.standardPlate, next);
-            if (updated.opacity !== undefined) {
-              activeObject.standardPlate.set({ opacity: updated.opacity });
-            }
-          }
+          activeObject.setElement(flatCanvas);
           
+          if (updated.rotation !== undefined) {
+            activeObject.set({ angle: updated.rotation });
+          }
+          if (updated.opacity !== undefined) {
+            activeObject.set({ opacity: updated.opacity });
+          }
+        } else {
+          // Perspective Warp Update in-place on persistent object (Section 3 & 4)
+          const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
+          try {
+            const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
+            activeObject.setElement(warpedCanvas);
+          } catch (e) {
+            console.error('Warp failed on option change:', e);
+          }
           if (updated.opacity !== undefined) {
             activeObject.set({ opacity: updated.opacity });
           }
         }
-        
+
+        assertPlateVisible(activeObject);
         canvas.renderAll();
       }
 
@@ -919,8 +934,31 @@ export default function BrandingEditorClient() {
   // VERSION 2 - PERSPECTIVE SHAPE CONTROLS & EVENT BINDINGS
   // ==================================================
   
+  // Helper to extract 4 transformed corner points from standard plate bounding box
+  const getPlateCorners = (obj: any): Point[] => {
+    const cx = obj.left;
+    const cy = obj.top;
+    const w = obj.width * obj.scaleX;
+    const h = obj.height * obj.scaleY;
+    const angleRad = (obj.angle || 0) * Math.PI / 180;
+    const cos = Math.cos(angleRad);
+    const sin = Math.sin(angleRad);
+
+    const getRotatedPoint = (rx: number, ry: number) => ({
+      x: cx + rx * cos - ry * sin,
+      y: cy + rx * sin + ry * cos,
+    });
+
+    return [
+      getRotatedPoint(-w / 2, -h / 2), // TL
+      getRotatedPoint(w / 2, -h / 2),  // TR
+      getRotatedPoint(w / 2, h / 2),   // BR
+      getRotatedPoint(-w / 2, h / 2),  // BL
+    ];
+  };
+
   // ==================================================
-  // 2. SAFE MODE TRANSITION & 3. DO NOT DELETE STANDARD PLATE
+  // 3. PERSISTENT SINGLE VISIBLE OBJECT TRANSITION (NON-DESTRUCTIVE)
   // ==================================================
   const handlePlateModeChange = (mode: PlateMode) => {
     const canvas = fabricCanvasRef.current;
@@ -932,104 +970,85 @@ export default function BrandingEditorClient() {
 
     try {
       if (mode === 'perspective') {
-        // Find standard plate object
-        const standardPlate = activeObject;
+        // Switch standard flat plate to perspective warped in-place on same object
+        const corners = getPlateCorners(activeObject);
 
-        // 4. Calculate transformed corners in original-image coordinates
-        // fabricObject.getCoords() returns coordinates in original image space directly!
-        const corners: Point[] = standardPlate.getCoords().map((p: any) => ({ x: p.x, y: p.y }));
-
-        // Validate corners
-        const isFinitePoint = (p: Point) => Number.isFinite(p.x) && Number.isFinite(p.y);
-        const isValidCorners = corners.length === 4 && corners.every(isFinitePoint);
-
-        if (!isValidCorners || !isConvex(corners)) {
-          console.warn('Invalid corners calculated from standard plate group:', corners);
+        const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
+        let warpedCanvas: HTMLCanvasElement;
+        try {
+          warpedCanvas = warpCanvasPerspective(flatCanvas, corners);
+        } catch (err) {
+          console.error('Initial warp failed:', err);
           alert('Perspective preview could not be created. Please ensure the plate is flat and visible.');
           isSyncingRef.current = false;
           return;
         }
 
-        // Render perspective preview offscreen
-        const flatCanvas = renderFlatPlateCanvas(standardPlate.plateOptions, imageMetadata.width, imageMetadata.height);
-        const warpedCanvas = warpCanvasPerspective(flatCanvas, corners);
-
-        // ==================================================
-        // 5. CORRECT PREVIEW BOUNDING BOX POSITIONING
-        // ==================================================
         const minX = Math.min(...corners.map((p) => p.x));
         const minY = Math.min(...corners.map((p) => p.y));
 
-        const previewPlate = new FabricImage(warpedCanvas, {
+        // Update the existing activeObject in-place! No visibility changes, no deletions!
+        activeObject.setElement(warpedCanvas);
+        activeObject.corners = corners;
+        activeObject.plateMode = 'perspective';
+        
+        activeObject.set({
           left: minX,
           top: minY,
-          opacity: standardPlate.opacity,
-          selectable: true,
-          hasControls: false, 
-          hasBorders: false,
+          scaleX: 1.0,
+          scaleY: 1.0,
+          angle: 0,
           originX: 'left',
           originY: 'top',
+          hasControls: false,
+          hasBorders: true,
         });
 
-        // Set metadata and links
-        const id = standardPlate.id;
-        const options = { ...standardPlate.plateOptions };
-        
-        (previewPlate as any).id = id + '_preview';
-        (previewPlate as any).isNamePlate = true;
-        (previewPlate as any).plateMode = 'perspective';
-        (previewPlate as any).plateOptions = options;
-        (previewPlate as any).corners = corners;
-        (previewPlate as any).standardPlate = standardPlate;
-        (previewPlate as any).lastLeft = minX;
-        (previewPlate as any).lastTop = minY;
-
-        // Move all corners together (delta shift listener)
-        previewPlate.on('moving', () => {
-          const dx = previewPlate.left - (previewPlate as any).lastLeft;
-          const dy = previewPlate.top - (previewPlate as any).lastTop;
+        // Initialize move listener if not already bound
+        if (!activeObject.hasMovingListener) {
+          activeObject.lastLeft = minX;
+          activeObject.lastTop = minY;
           
-          (previewPlate as any).lastLeft = previewPlate.left;
-          (previewPlate as any).lastTop = previewPlate.top;
+          activeObject.on('moving', () => {
+            const dx = activeObject.left - activeObject.lastLeft;
+            const dy = activeObject.top - activeObject.lastTop;
+            activeObject.lastLeft = activeObject.left;
+            activeObject.lastTop = activeObject.top;
 
-          // Shift all four corners by same delta
-          (previewPlate as any).corners = (previewPlate as any).corners.map((p: Point) => ({
-            x: p.x + dx,
-            y: p.y + dy,
-          }));
+            // Shift all corners by same delta (Section 9)
+            activeObject.corners = activeObject.corners.map((p: Point) => ({
+              x: p.x + dx,
+              y: p.y + dy,
+            }));
 
-          // Synchronize handles if Adjust Mode is active
-          if (isAdjustingPerspective) {
-            handlesRef.current.forEach((h: any) => {
-              const corner = (previewPlate as any).corners[h.cornerIndex];
-              h.set({ left: corner.x, top: corner.y });
-              h.setCoords();
-            });
-            updateGuideLines((previewPlate as any).corners);
-          }
-        });
+            // Sync handle locations if Adjust Mode is active
+            if (isAdjustingPerspective) {
+              handlesRef.current.forEach((h: any) => {
+                const corner = activeObject.corners[h.cornerIndex];
+                h.set({ left: corner.x, top: corner.y });
+                h.setCoords();
+              });
+              updateGuideLines(activeObject.corners);
+            }
+          });
 
-        previewPlate.on('modified', () => {
-          pushToHistory();
-        });
+          activeObject.on('modified', () => {
+            pushToHistory();
+          });
 
-        // Add perspective preview to canvas
-        canvas.add(previewPlate);
+          activeObject.hasMovingListener = true;
+        } else {
+          activeObject.lastLeft = minX;
+          activeObject.lastTop = minY;
+        }
 
-        // Hide standard plate canonical source only after preview is loaded (Section 3)
-        standardPlate.set({
-          visible: false,
-          selectable: false,
-          evented: false,
-        });
+        activeObject.setCoords();
+        setSelectedPlateMode('perspective');
 
-        // Focus selection on preview plate
-        canvas.setActiveObject(previewPlate);
-        
         // Diagnostics Log (Section 1)
         console.log('Perspective Adjust Transition Diagnostics:', {
-          selectedPlateId: standardPlate.id,
-          standardPlateVisible: standardPlate.visible,
+          selectedPlateId: activeObject.id,
+          standardPlateVisible: activeObject.visible,
           perspectiveMode: mode,
           topLeft: corners[0],
           topRight: corners[1],
@@ -1038,63 +1057,61 @@ export default function BrandingEditorClient() {
           boundingBox: { minX, minY, width: warpedCanvas.width, height: warpedCanvas.height },
           previewCanvasWidth: warpedCanvas.width,
           previewCanvasHeight: warpedCanvas.height,
-          previewObjectLeft: previewPlate.left,
-          previewObjectTop: previewPlate.top,
-          previewObjectWidth: previewPlate.width,
-          previewObjectHeight: previewPlate.height,
-          previewObjectScaleX: previewPlate.scaleX,
-          previewObjectScaleY: previewPlate.scaleY,
-          previewObjectVisible: previewPlate.visible,
-          previewObjectOpacity: previewPlate.opacity,
+          previewObjectLeft: activeObject.left,
+          previewObjectTop: activeObject.top,
+          previewObjectWidth: activeObject.width,
+          previewObjectHeight: activeObject.height,
+          previewObjectScaleX: activeObject.scaleX,
+          previewObjectScaleY: activeObject.scaleY,
+          previewObjectVisible: activeObject.visible,
+          previewObjectOpacity: activeObject.opacity,
           fabricObjectCount: canvas.getObjects().length,
         });
 
-        setSelectedPlateMode('perspective');
-        setActiveObject(previewPlate);
+        assertPlateVisible(activeObject);
       } else {
-        // Switch back to Standard flat group
+        // Switch back to Standard flat group in-place on same object
         clearPerspectiveHandles(canvas);
         setIsAdjustingPerspective(false);
 
-        const previewPlate = activeObject;
-        const standardPlate = previewPlate.standardPlate;
+        const corners = activeObject.corners as Point[];
+        const cx = corners.reduce((sum, p) => sum + p.x, 0) / 4;
+        const cy = corners.reduce((sum, p) => sum + p.y, 0) / 4;
 
-        if (standardPlate) {
-          // Re-align standard plate center to the average center of warped corners
-          const corners = previewPlate.corners as Point[];
-          const cx = corners.reduce((sum, p) => sum + p.x, 0) / 4;
-          const cy = corners.reduce((sum, p) => sum + p.y, 0) / 4;
+        const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
+        
+        activeObject.setElement(flatCanvas);
+        activeObject.plateMode = 'standard';
+        activeObject.corners = null;
 
-          standardPlate.set({
-            left: cx,
-            top: cy,
-            visible: true,
-            selectable: true,
-            evented: true,
-          });
-          standardPlate.setCoords();
+        activeObject.set({
+          left: cx,
+          top: cy,
+          scaleX: 1.0,
+          scaleY: 1.0,
+          angle: activeObject.plateOptions.rotation || 0,
+          originX: 'center',
+          originY: 'center',
+          hasControls: true,
+          hasBorders: true,
+        });
 
-          // Remove preview plate
-          canvas.remove(previewPlate);
+        activeObject.setCoords();
+        setSelectedPlateMode('standard');
 
-          // Focus standard plate
-          canvas.setActiveObject(standardPlate);
-
-          setSelectedPlateMode('standard');
-          setActiveObject(standardPlate);
-        }
+        assertPlateVisible(activeObject);
       }
 
       canvas.renderAll();
       pushToHistory();
     } catch (err) {
       console.error('Error switching plate mode:', err);
-      alert('Perspective adjustment failed to initialize.');
     } finally {
       isSyncingRef.current = false;
     }
   };
 
+  // Toggle Adjust Corners (draws corner handles, outline guides)
   const handleToggleAdjustPerspective = () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !activeObject || !activeObject.isNamePlate || activeObject.plateMode !== 'perspective') return;
@@ -1104,10 +1121,11 @@ export default function BrandingEditorClient() {
       originalCornersRef.current = activeObject.corners.map((p: Point) => ({ ...p }));
       setIsAdjustingPerspective(true);
       
-      // Hide selection borders on warped preview during edit
+      // Hide selection borders on plate object during corner edit
       activeObject.set({ hasControls: false, hasBorders: false });
       
       renderPerspectiveHandles(canvas, activeObject);
+      assertPlateVisible(activeObject);
     } else {
       handleApplyAdjust();
     }
@@ -1122,7 +1140,7 @@ export default function BrandingEditorClient() {
     setActiveCornerIndex(null);
     setMagnifierCoords(null);
 
-    // Keep standard borders/controls for selection (no scaling/rotate)
+    // Restore standard borders for active selection
     activeObject.set({
       hasControls: false,
       hasBorders: true,
@@ -1137,6 +1155,7 @@ export default function BrandingEditorClient() {
       setHasSavedShape(true);
     }
 
+    assertPlateVisible(activeObject);
     pushToHistory();
     canvas.renderAll();
   };
@@ -1148,17 +1167,21 @@ export default function BrandingEditorClient() {
     // Restore corner positions
     activeObject.corners = originalCornersRef.current.map((p) => ({ ...p }));
     
-    // Re-warp back to backup
+    // Re-warp back to backup corners
     const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-    const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
-    activeObject.setElement(warpedCanvas);
+    try {
+      const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
+      activeObject.setElement(warpedCanvas);
+    } catch (e) {
+      console.error('Cancel warp failed:', e);
+    }
 
     const minX = Math.min(...activeObject.corners.map((p: Point) => p.x));
     const minY = Math.min(...activeObject.corners.map((p: Point) => p.y));
     activeObject.set({ left: minX, top: minY });
     activeObject.setCoords();
-    (activeObject as any).lastLeft = minX;
-    (activeObject as any).lastTop = minY;
+    activeObject.lastLeft = minX;
+    activeObject.lastTop = minY;
 
     setIsAdjustingPerspective(false);
     clearPerspectiveHandles(canvas);
@@ -1170,6 +1193,7 @@ export default function BrandingEditorClient() {
       hasBorders: true,
     });
 
+    assertPlateVisible(activeObject);
     canvas.renderAll();
   };
 
@@ -1182,20 +1206,24 @@ export default function BrandingEditorClient() {
     const cy = corners.reduce((sum, p) => sum + p.y, 0) / 4;
 
     const baseWidth = imageMetadata.width * 0.3;
-    const baseHeight = baseWidth * (400 / 1200); // 3:1 aspect ratio
+    const baseHeight = baseWidth * (400 / 1200);
 
     const resetCorners: Point[] = [
-      { x: cx - baseWidth / 2, y: cy - baseHeight / 2 }, // TL
-      { x: cx + baseWidth / 2, y: cy - baseHeight / 2 }, // TR
-      { x: cx + baseWidth / 2, y: cy + baseHeight / 2 }, // BR
-      { x: cx - baseWidth / 2, y: cy + baseHeight / 2 }, // BL
+      { x: cx - baseWidth / 2, y: cy - baseHeight / 2 },
+      { x: cx + baseWidth / 2, y: cy - baseHeight / 2 },
+      { x: cx + baseWidth / 2, y: cy + baseHeight / 2 },
+      { x: cx - baseWidth / 2, y: cy + baseHeight / 2 },
     ];
 
     activeObject.corners = resetCorners;
 
     const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-    const warpedCanvas = warpCanvasPerspective(flatCanvas, resetCorners);
-    activeObject.setElement(warpedCanvas);
+    try {
+      const warpedCanvas = warpCanvasPerspective(flatCanvas, resetCorners);
+      activeObject.setElement(warpedCanvas);
+    } catch (e) {
+      console.error('Reset warp failed:', e);
+    }
 
     const minX = Math.min(...resetCorners.map((p) => p.x));
     const minY = Math.min(...resetCorners.map((p) => p.y));
@@ -1209,6 +1237,8 @@ export default function BrandingEditorClient() {
     } else {
       canvas.renderAll();
     }
+    
+    assertPlateVisible(activeObject);
     pushToHistory();
   };
 
@@ -1267,6 +1297,8 @@ export default function BrandingEditorClient() {
       } else {
         canvas.renderAll();
       }
+      
+      assertPlateVisible(activeObject);
       pushToHistory();
     } catch (e) {
       console.error('Failed to parse saved perspective shape:', e);
@@ -1281,44 +1313,33 @@ export default function BrandingEditorClient() {
     const options = { ...activeObject.plateOptions };
     
     if (activeObject.plateMode === 'standard') {
-      const clone = createNamePlate(options, imageMetadata.width, imageMetadata.height);
+      const flatCanvas = renderFlatPlateCanvas(options, imageMetadata.width, imageMetadata.height);
+      const clone = new FabricImage(flatCanvas, {
+        left: activeObject.left + 40,
+        top: activeObject.top + 40,
+        opacity: activeObject.opacity,
+        angle: activeObject.angle,
+        selectable: true,
+        hasControls: true,
+        hasBorders: true,
+        transparentCorners: false,
+        cornerColor: '#8B0000',
+        cornerStrokeColor: '#FFFFFF',
+        borderColor: '#8B0000',
+        cornerSize: 12,
+      });
+
       (clone as any).id = id;
       (clone as any).isNamePlate = true;
       (clone as any).plateMode = 'standard';
       (clone as any).plateOptions = options;
-
-      clone.set({
-        left: activeObject.left + 40,
-        top: activeObject.top + 40,
-        scaleX: activeObject.scaleX,
-        scaleY: activeObject.scaleY,
-        angle: activeObject.angle,
-        opacity: activeObject.opacity,
-      });
+      (clone as any).corners = null;
 
       canvas.add(clone);
       canvas.setActiveObject(clone);
+      assertPlateVisible(clone);
     } else {
-      // Duplicate perspective warped plate (Standard plate duplicated invisible, Warp duplicate visible)
-      // 1. Duplicate standard source plate
-      const stdParent = activeObject.standardPlate;
-      const cloneStd = createNamePlate(options, imageMetadata.width, imageMetadata.height);
-      (cloneStd as any).id = id;
-      (cloneStd as any).isNamePlate = true;
-      (cloneStd as any).plateMode = 'standard';
-      (cloneStd as any).plateOptions = options;
-
-      // Position standard source offset in background
-      cloneStd.set({
-        left: (stdParent?.left || activeObject.left) + 40,
-        top: (stdParent?.top || activeObject.top) + 40,
-        visible: false,
-        selectable: false,
-        evented: false,
-      });
-      canvas.add(cloneStd);
-
-      // 2. Duplicate warped preview
+      // Duplicate warped plate in-place (Section 3: one visible object)
       const offsetCorners = activeObject.corners.map((p: Point) => ({
         x: p.x + 40,
         y: p.y + 40,
@@ -1327,7 +1348,7 @@ export default function BrandingEditorClient() {
       const flatCanvas = renderFlatPlateCanvas(options, imageMetadata.width, imageMetadata.height);
       const warpedCanvas = warpCanvasPerspective(flatCanvas, offsetCorners);
 
-      const cloneWarp = new FabricImage(warpedCanvas, {
+      const clone = new FabricImage(warpedCanvas, {
         opacity: activeObject.opacity,
         selectable: true,
         hasControls: false,
@@ -1336,36 +1357,36 @@ export default function BrandingEditorClient() {
         originY: 'top',
       });
 
-      (cloneWarp as any).id = id + '_preview';
-      (cloneWarp as any).isNamePlate = true;
-      (cloneWarp as any).plateMode = 'perspective';
-      (cloneWarp as any).plateOptions = options;
-      (cloneWarp as any).corners = offsetCorners;
-      (cloneWarp as any).standardPlate = cloneStd;
-      (cloneWarp as any).lastLeft = cloneWarp.left;
-      (cloneWarp as any).lastTop = cloneWarp.top;
+      (clone as any).id = id;
+      (clone as any).isNamePlate = true;
+      (clone as any).plateMode = 'perspective';
+      (clone as any).plateOptions = options;
+      (clone as any).corners = offsetCorners;
+      (clone as any).lastLeft = clone.left;
+      (clone as any).lastTop = clone.top;
 
-      cloneWarp.on('moving', () => {
-        const dx = cloneWarp.left - (cloneWarp as any).lastLeft;
-        const dy = cloneWarp.top - (cloneWarp as any).lastTop;
-        (cloneWarp as any).lastLeft = cloneWarp.left;
-        (cloneWarp as any).lastTop = cloneWarp.top;
-        (cloneWarp as any).corners = (cloneWarp as any).corners.map((p: Point) => ({
+      clone.on('moving', () => {
+        const dx = clone.left - (clone as any).lastLeft;
+        const dy = clone.top - (clone as any).lastTop;
+        (clone as any).lastLeft = clone.left;
+        (clone as any).lastTop = clone.top;
+        (clone as any).corners = (clone as any).corners.map((p: Point) => ({
           x: p.x + dx,
           y: p.y + dy,
         }));
       });
 
-      cloneWarp.on('modified', () => {
+      clone.on('modified', () => {
         pushToHistory();
       });
 
       const minX = Math.min(...offsetCorners.map((p: Point) => p.x));
       const minY = Math.min(...offsetCorners.map((p: Point) => p.y));
-      cloneWarp.set({ left: minX, top: minY });
+      clone.set({ left: minX, top: minY });
 
-      canvas.add(cloneWarp);
-      canvas.setActiveObject(cloneWarp);
+      canvas.add(clone);
+      canvas.setActiveObject(clone);
+      assertPlateVisible(clone);
     }
 
     canvas.renderAll();
@@ -1392,16 +1413,13 @@ export default function BrandingEditorClient() {
         evented: false,
         hasControls: false,
         hasBorders: false,
-        excludeFromExport: true, // Marker to exclude from download
+        excludeFromExport: true, // Marker to exclude from final download (Section 7)
       });
       canvas.add(line);
       lines.push(line);
     }
     linesRef.current = lines;
 
-    // ==================================================
-    // 6. LAYER ORDERING COMPLIANCE
-    // ==================================================
     // Bring guide lines above background & watermark
     lines.forEach((l) => {
       canvas.bringObjectToFront(l);
@@ -1425,14 +1443,14 @@ export default function BrandingEditorClient() {
         hasControls: false,
         hasBorders: false,
         selectable: true,
-        excludeFromExport: true, // Excluded from final canvas render
+        excludeFromExport: true, // Excluded from download (Section 7)
       });
 
       (handle as any).isPerspectiveHandle = true;
       (handle as any).cornerIndex = index;
       (handle as any).plateId = plateObj.id;
 
-      // Handle Dragging Listener
+      // Handle Dragging Listener (Section 9)
       handle.on('moving', (opt) => {
         const nextX = handle.left;
         const nextY = handle.top;
@@ -1445,7 +1463,7 @@ export default function BrandingEditorClient() {
           corners[index].x = nextX;
           corners[index].y = nextY;
 
-          // Double buffer: warp preview offscreen and swap
+          // Double buffer: warp preview offscreen and swap in-place
           const flatCanvas = renderFlatPlateCanvas(plateObj.plateOptions, bgImageElementRef.current!.naturalWidth, bgImageElementRef.current!.naturalHeight);
           const warpedCanvas = warpCanvasPerspective(flatCanvas, corners);
           plateObj.setElement(warpedCanvas);
@@ -1467,7 +1485,7 @@ export default function BrandingEditorClient() {
             canvas.bringObjectToFront(h);
           });
 
-          // Magnifier
+          // Magnifier (Section 14)
           const pointerEvt = opt.e as any;
           let clientX = 100;
           let clientY = 100;
@@ -1482,6 +1500,7 @@ export default function BrandingEditorClient() {
           }
           setMagnifierCoords({ x: nextX, y: nextY, clientX, clientY });
 
+          assertPlateVisible(plateObj);
           canvas.renderAll();
         } else {
           // Revert position
@@ -1578,7 +1597,7 @@ export default function BrandingEditorClient() {
     ctx.strokeRect(1, 1, 158, 158);
   }, [magnifierCoords]);
 
-  // Zoom / Viewport Panning Controls
+  // Zoom / Viewport Panning Controls (Non-destructive: visual adjustments via CSS styles)
   const handleZoom = (type: 'in' | 'out' | 'fit') => {
     const container = containerRef.current;
     const canvas = fabricCanvasRef.current;
@@ -1604,9 +1623,14 @@ export default function BrandingEditorClient() {
       nextZoom
     );
     setDisplayScale(scale);
+
+    // Refresh handles to match displayScale zoom change
+    if (isAdjustingPerspective && activeObject) {
+      renderPerspectiveHandles(canvas, activeObject);
+    }
   };
 
-  // Before / After Preview Toggle
+  // Before / After Preview Toggle (Hides watermark overlays, outlines, and plates)
   const handleTogglePreview = (active: boolean) => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
@@ -1623,15 +1647,10 @@ export default function BrandingEditorClient() {
     canvas.getObjects().forEach((obj: any) => {
       if (obj.isNamePlate) {
         obj.set({
-          visible: !active && (obj.plateMode === 'standard' || obj.standardPlate !== undefined),
+          visible: !active,
           selectable: !active,
           evented: !active,
         });
-        
-        // Ensure standard plates that correspond to perspective previews remain invisible
-        if (!active && obj.plateMode === 'standard' && canvas.getObjects().some((p: any) => p.plateMode === 'perspective' && p.standardPlate === obj)) {
-          obj.set({ visible: false, selectable: false, evented: false });
-        }
       } else if (obj.isWatermark) {
         obj.set({
           visible: !active && watermarkOptions.visible,
@@ -1657,12 +1676,6 @@ export default function BrandingEditorClient() {
         return;
       } else {
         clearPerspectiveHandles(canvas);
-        
-        // Remove standard linked plate too if active is preview
-        if ((active as any).standardPlate) {
-          canvas.remove((active as any).standardPlate);
-        }
-        
         canvas.remove(active);
         canvas.discardActiveObject();
         canvas.renderAll();
