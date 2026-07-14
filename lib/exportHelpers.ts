@@ -1,6 +1,7 @@
 import { Canvas, FabricImage, Group } from 'fabric';
-import { ExportPreset, ExportFormat, ExportQuality, FitMethod, WatermarkOptions, ImageMetadata } from '../types';
-import { createNamePlate, getWatermarkCoords, updatePlateProperties } from './canvasHelpers';
+import { ExportPreset, ExportFormat, ExportQuality, FitMethod, WatermarkOptions, ImageMetadata, Point } from '../types';
+import { createNamePlate, getWatermarkCoords } from './canvasHelpers';
+import { warpCanvasPerspective } from './perspectiveWarp';
 
 interface ExportOptions {
   preset: ExportPreset;
@@ -11,6 +12,50 @@ interface ExportOptions {
   watermarkOptions: WatermarkOptions;
   isWatermarkManual: boolean;
   imageMetadata: ImageMetadata;
+}
+
+/**
+ * Generates flat plate canvas for perspective warping.
+ */
+export function renderFlatPlateCanvas(
+  plateOptions: any,
+  originalWidth: number,
+  originalHeight: number
+): HTMLCanvasElement {
+  // 1. Create flat plate group using helper
+  const plateGroup = createNamePlate(plateOptions, originalWidth, originalHeight);
+
+  // 2. Determine bounds of the flat plate
+  const flatWidth = Math.ceil(plateGroup.width);
+  const flatHeight = Math.ceil(plateGroup.height);
+
+  const flatCanvasElement = document.createElement('canvas');
+  flatCanvasElement.width = flatWidth;
+  flatCanvasElement.height = flatHeight;
+
+  // 3. Create a static canvas to render it
+  const tempStaticCanvas = new Canvas(flatCanvasElement, {
+    width: flatWidth,
+    height: flatHeight,
+  });
+
+  // Center plate group in canvas
+  plateGroup.set({
+    left: flatWidth / 2,
+    top: flatHeight / 2,
+    angle: 0, // Draw unrotated
+    scaleX: 1,
+    scaleY: 1,
+    shadow: null, // Apply shadow at the warp level or keep it flat
+  });
+
+  tempStaticCanvas.add(plateGroup);
+  tempStaticCanvas.renderAll();
+
+  // Clean up
+  tempStaticCanvas.dispose();
+
+  return flatCanvasElement;
 }
 
 /**
@@ -33,9 +78,12 @@ export async function generateExportDataUrl(
     imageMetadata,
   } = options;
 
+  const originalWidth = imageMetadata.width;
+  const originalHeight = imageMetadata.height;
+
   // 1. Determine target dimensions
-  let targetWidth = imageMetadata.width;
-  let targetHeight = imageMetadata.height;
+  let targetWidth = originalWidth;
+  let targetHeight = originalHeight;
 
   if (preset === 'facebook_square') {
     targetWidth = 1080;
@@ -53,182 +101,155 @@ export async function generateExportDataUrl(
   tempCanvasElement.width = targetWidth;
   tempCanvasElement.height = targetHeight;
 
+  // Opacity check for background
   const tempCanvas = new Canvas(tempCanvasElement, {
     width: targetWidth,
     height: targetHeight,
     backgroundColor: preset === 'original' ? undefined : backgroundColor,
   });
 
-  // 3. Position and scale the background image on the export canvas
-  let tempBgLeft = 0;
-  let tempBgTop = 0;
-  let tempBgScaleX = 1;
-  let tempBgScaleY = 1;
+  // 3. Position and scale the background photo on the export canvas
+  let scale = 1.0;
+  let leftOffset = 0;
+  let topOffset = 0;
 
-  if (preset === 'original') {
-    tempBgScaleX = targetWidth / bgImgElement.naturalWidth;
-    tempBgScaleY = targetHeight / bgImgElement.naturalHeight;
-  } else {
-    const srcWidth = bgImgElement.naturalWidth;
-    const srcHeight = bgImgElement.naturalHeight;
-    const scaleFit = Math.min(targetWidth / srcWidth, targetHeight / srcHeight);
-    const scaleFill = Math.max(targetWidth / srcWidth, targetHeight / srcHeight);
+  if (preset !== 'original') {
+    const scaleFit = Math.min(targetWidth / originalWidth, targetHeight / originalHeight);
+    const scaleFill = Math.max(targetWidth / originalWidth, targetHeight / originalHeight);
 
     if (fitMethod === 'fit') {
-      tempBgScaleX = scaleFit;
-      tempBgScaleY = scaleFit;
-      const imgWidth = srcWidth * scaleFit;
-      const imgHeight = srcHeight * scaleFit;
-      tempBgLeft = (targetWidth - imgWidth) / 2;
-      tempBgTop = (targetHeight - imgHeight) / 2;
+      scale = scaleFit;
+      const imgWidth = originalWidth * scaleFit;
+      const imgHeight = originalHeight * scaleFit;
+      leftOffset = (targetWidth - imgWidth) / 2;
+      topOffset = (targetHeight - imgHeight) / 2;
     } else {
       // fill
-      tempBgScaleX = scaleFill;
-      tempBgScaleY = scaleFill;
-      const imgWidth = srcWidth * scaleFill;
-      const imgHeight = srcHeight * scaleFill;
-      tempBgLeft = (targetWidth - imgWidth) / 2;
-      tempBgTop = (targetHeight - imgHeight) / 2;
+      scale = scaleFill;
+      const imgWidth = originalWidth * scaleFill;
+      const imgHeight = originalHeight * scaleFill;
+      leftOffset = (targetWidth - imgWidth) / 2;
+      topOffset = (targetHeight - imgHeight) / 2;
     }
   }
 
   const tempBgImg = new FabricImage(bgImgElement, {
-    left: tempBgLeft,
-    top: tempBgTop,
-    scaleX: tempBgScaleX,
-    scaleY: tempBgScaleY,
+    left: leftOffset,
+    top: topOffset,
+    scaleX: scale,
+    scaleY: scale,
     selectable: false,
     evented: false,
   });
 
   tempCanvas.add(tempBgImg);
 
-  // 4. Find the background image on the display canvas to translate coordinates
-  const displayBgObj = displayCanvas.getObjects().find((obj) => !(obj as any).isNamePlate && !(obj as any).isWatermark);
-  if (!displayBgObj) {
-    throw new Error('Background image not found on display canvas');
-  }
+  // 4. Replicate and scale branding overlays
+  const canvasObjects = displayCanvas.getObjects();
 
-  const displayBgLeft = displayBgObj.left || 0;
-  const displayBgTop = displayBgObj.top || 0;
-  const displayBgScaleX = displayBgObj.scaleX || 1;
-  const displayBgScaleY = displayBgObj.scaleY || 1;
+  for (const obj of canvasObjects) {
+    const customObj = obj as any;
 
-  // Helper to map coordinates from display canvas to temp canvas
-  const mapCoords = (dispLeft: number, dispTop: number) => {
-    const xOrig = (dispLeft - displayBgLeft) / displayBgScaleX;
-    const yOrig = (dispTop - displayBgTop) / displayBgScaleY;
-    const xTemp = xOrig * tempBgScaleX + tempBgLeft;
-    const yTemp = yOrig * tempBgScaleY + tempBgTop;
-    return { left: xTemp, top: yTemp };
-  };
+    if (customObj.isNamePlate) {
+      const plateMode = customObj.plateMode || 'standard';
+      const plateOptions = customObj.plateOptions;
 
-  // Helper to map scale from display canvas to temp canvas
-  const mapScale = (dispScaleX: number, dispScaleY: number) => {
-    const scaleXOrig = dispScaleX / displayBgScaleX;
-    const scaleYOrig = dispScaleY / displayBgScaleY;
-    return {
-      scaleX: scaleXOrig * tempBgScaleX,
-      scaleY: scaleYOrig * tempBgScaleY,
-    };
-  };
+      if (plateMode === 'standard') {
+        // Standard plate group
+        const newPlate = createNamePlate(plateOptions, originalWidth, originalHeight);
+        
+        newPlate.set({
+          left: obj.left * scale + leftOffset,
+          top: obj.top * scale + topOffset,
+          scaleX: obj.scaleX * scale,
+          scaleY: obj.scaleY * scale,
+          angle: obj.angle,
+          opacity: obj.opacity,
+          selectable: false,
+        });
 
-  // 5. Replicate and scale Name Plates
-  const displayPlates = displayCanvas.getObjects().filter((obj) => (obj as any).isNamePlate) as Group[];
+        tempCanvas.add(newPlate);
+      } else {
+        // Perspective plate
+        const corners: Point[] = customObj.corners;
+        if (corners && corners.length === 4) {
+          // Scale and offset corners
+          const scaledCorners = corners.map((p) => ({
+            x: p.x * scale + leftOffset,
+            y: p.y * scale + topOffset,
+          }));
 
-  for (const plate of displayPlates) {
-    // Re-create the plate using the original options
-    // First, let's gather its options from custom properties
-    const bgRect = (plate as any).bgRect;
-    const borderRect = (plate as any).borderRect;
-    const textObj = (plate as any).textObj;
+          const flatCanvas = renderFlatPlateCanvas(plateOptions, originalWidth, originalHeight);
+          const warpedCanvas = warpCanvasPerspective(flatCanvas, scaledCorners);
 
-    const plateOptions = {
-      text: textObj.text || '',
-      backgroundColor: bgRect.fill as string,
-      textColor: textObj.fill as string,
-      borderColor: borderRect.stroke as string,
-      borderWidth: borderRect.strokeWidth || 2,
-      cornerRadius: bgRect.rx || 0,
-      opacity: plate.opacity || 1,
-      rotation: plate.angle || 0,
-      shadow: !!plate.shadow,
-    };
+          // Find coordinates bounding box
+          const minX = Math.min(...scaledCorners.map((p) => p.x));
+          const minY = Math.min(...scaledCorners.map((p) => p.y));
 
-    // We create a new plate at display scale, then apply the mapped scale and position
-    const newPlate = createNamePlate(plateOptions, displayCanvas.width, displayCanvas.height);
-    
-    // Map position
-    const { left, top } = mapCoords(plate.left, plate.top);
-    // Map scale
-    const { scaleX, scaleY } = mapScale(plate.scaleX, plate.scaleY);
+          const warpedImageObj = new FabricImage(warpedCanvas, {
+            left: minX,
+            top: minY,
+            opacity: obj.opacity,
+            selectable: false,
+            evented: false,
+          });
 
-    newPlate.set({
-      left,
-      top,
-      scaleX,
-      scaleY,
-      angle: plate.angle,
-      selectable: false,
-    });
-
-    tempCanvas.add(newPlate);
-  }
-
-  // 6. Replicate and scale Watermark Logo
-  const displayWatermark = displayCanvas.getObjects().find((obj) => (obj as any).isWatermark);
-  if (displayWatermark && watermarkOptions.visible) {
-    const logoImgElement = (displayWatermark as FabricImage).getElement() as HTMLImageElement;
-    
-    const newWatermark = new FabricImage(logoImgElement, {
-      opacity: watermarkOptions.opacity,
-      selectable: false,
-      evented: false,
-    });
-
-    if (isWatermarkManual) {
-      // Map manual positioning
-      const { left, top } = mapCoords(displayWatermark.left, displayWatermark.top);
-      const { scaleX, scaleY } = mapScale(displayWatermark.scaleX, displayWatermark.scaleY);
-      newWatermark.set({
-        left,
-        top,
-        scaleX,
-        scaleY,
-        angle: displayWatermark.angle,
+          tempCanvas.add(warpedImageObj);
+        }
+      }
+    } else if (customObj.isWatermark && watermarkOptions.visible) {
+      // Replicate Watermark
+      const logoImgElement = (obj as FabricImage).getElement() as HTMLImageElement;
+      
+      const newWatermark = new FabricImage(logoImgElement, {
+        opacity: watermarkOptions.opacity,
+        selectable: false,
+        evented: false,
       });
-    } else {
-      // Map preset positioning using canvas size
-      const { left, top, scale } = getWatermarkCoords(
-        logoImgElement.naturalWidth || logoImgElement.width,
-        logoImgElement.naturalHeight || logoImgElement.height,
-        targetWidth,
-        targetHeight,
-        watermarkOptions
-      );
-      newWatermark.set({
-        left,
-        top,
-        scaleX: scale,
-        scaleY: scale,
-      });
+
+      if (isWatermarkManual) {
+        // Translate manual watermark drag coords
+        newWatermark.set({
+          left: obj.left * scale + leftOffset,
+          top: obj.top * scale + topOffset,
+          scaleX: obj.scaleX * scale,
+          scaleY: obj.scaleY * scale,
+          angle: obj.angle,
+        });
+      } else {
+        // Watermark Snapped Preset Positioning
+        const { left, top, scale: wmScale } = getWatermarkCoords(
+          logoImgElement.naturalWidth || logoImgElement.width,
+          logoImgElement.naturalHeight || logoImgElement.height,
+          originalWidth,
+          originalHeight,
+          watermarkOptions
+        );
+        newWatermark.set({
+          left: left * scale + leftOffset,
+          top: top * scale + topOffset,
+          scaleX: wmScale * scale,
+          scaleY: wmScale * scale,
+        });
+      }
+
+      tempCanvas.add(newWatermark);
     }
-
-    tempCanvas.add(newWatermark);
   }
 
-  // 7. Render everything
+  // 5. Render offscreen
   tempCanvas.renderAll();
 
-  // 8. Export to Data URL
-  const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+  // 6. Export to Data URL
+  // If JPG, ensure opaque background by filling canvas background with white if transparent
+  const mimeType = format === 'jpeg' ? 'jpeg' : 'png';
   const dataUrl = tempCanvas.toDataURL({
-    format: format === 'jpeg' ? 'jpeg' : 'png',
+    format: mimeType,
     quality: format === 'jpeg' ? quality : undefined,
     multiplier: 1,
   });
 
-  // 9. Dispose of temporary canvas to release memory
+  // 7. Clean up offscreen canvas
   tempCanvas.dispose();
 
   return dataUrl;

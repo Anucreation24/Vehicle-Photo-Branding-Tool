@@ -175,12 +175,13 @@ export function getWatermarkCoords(
   canvasHeight: number,
   options: WatermarkOptions
 ) {
-  // Target width is e.g. 15% of canvas width
+  // Target width is scale percentage of canvas width (e.g. 18%)
   const targetWidth = canvasWidth * options.scale;
   const scale = targetWidth / logoWidth;
   const targetHeight = logoHeight * scale;
 
-  const margin = Math.min(25, canvasWidth * 0.04); // 4% margin, cap at 25px
+  // 3% margin
+  const margin = canvasWidth * 0.03;
 
   let left = margin;
   let top = margin;

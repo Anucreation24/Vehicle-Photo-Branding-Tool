@@ -8,6 +8,13 @@ export type FitMethod = 'fit' | 'fill';
 
 export type WatermarkPosition = 'bottom-left' | 'bottom-right' | 'top-left' | 'top-right';
 
+export type PlateMode = 'standard' | 'perspective';
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
 export interface PlateOptions {
   text: string;
   backgroundColor: string;

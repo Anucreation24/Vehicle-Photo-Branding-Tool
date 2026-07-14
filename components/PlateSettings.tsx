@@ -1,15 +1,25 @@
 import React from 'react';
-import { PlateOptions, PLATE_PRESETS, PlatePreset } from '../types';
-import { Type, Layers, RefreshCw, Palette } from 'lucide-react';
+import { PlateOptions, PLATE_PRESETS, PlatePreset, PlateMode } from '../types';
+import { Type, Layers, RefreshCw, Palette, Sliders, Maximize, Move, HelpCircle } from 'lucide-react';
 
 interface PlateSettingsProps {
   options: PlateOptions;
+  plateMode: PlateMode;
+  onChangeMode: (mode: PlateMode) => void;
+  onResetPerspective: () => void;
+  onCopyPreviousShape: () => void;
+  hasOtherPerspectivePlates: boolean;
   onChange: (options: Partial<PlateOptions>) => void;
   onApplyPreset: (preset: PlatePreset) => void;
 }
 
 export default function PlateSettings({
   options,
+  plateMode,
+  onChangeMode,
+  onResetPerspective,
+  onCopyPreviousShape,
+  hasOtherPerspectivePlates,
   onChange,
   onApplyPreset,
 }: PlateSettingsProps) {
@@ -30,7 +40,8 @@ export default function PlateSettings({
   };
 
   return (
-    <div className="w-full bg-neutral-900 border border-neutral-800 rounded-xl p-4 shadow-lg space-y-5">
+    <div className="w-full bg-neutral-900 border border-neutral-800 rounded-xl p-4 shadow-lg space-y-4">
+      {/* Header */}
       <div className="flex items-center gap-2 border-b border-neutral-800 pb-3">
         <Palette className="w-4 h-4 text-red-500" />
         <h3 className="text-sm font-bold text-white uppercase tracking-wider">
@@ -38,8 +49,83 @@ export default function PlateSettings({
         </h3>
       </div>
 
+      {/* Editing Mode Selection */}
+      <div className="space-y-1.5">
+        <label className="text-xs font-semibold text-neutral-400">Editing Mode</label>
+        <div className="grid grid-cols-2 gap-2 bg-neutral-950 p-1 rounded-lg border border-neutral-850">
+          <button
+            type="button"
+            onClick={() => onChangeMode('standard')}
+            className={`py-1.5 px-3 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5
+              ${
+                plateMode === 'standard'
+                  ? 'bg-neutral-800 text-white shadow-sm'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+          >
+            <Move className="w-3.5 h-3.5" />
+            Standard
+          </button>
+          <button
+            type="button"
+            onClick={() => onChangeMode('perspective')}
+            className={`py-1.5 px-3 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5
+              ${
+                plateMode === 'perspective'
+                  ? 'bg-red-950 text-red-400 border border-red-900/40 shadow-sm'
+                  : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+          >
+            <Maximize className="w-3.5 h-3.5" />
+            Perspective
+          </button>
+        </div>
+      </div>
+
+      {/* Mode Specific Controls */}
+      {plateMode === 'perspective' ? (
+        <div className="space-y-3.5 bg-neutral-950/40 border border-neutral-850/60 p-3.5 rounded-xl animate-fade-in">
+          <div className="flex items-center gap-2 text-red-400">
+            <Maximize className="w-4 h-4 shrink-0" />
+            <h4 className="text-xs font-bold uppercase tracking-wider">Perspective Warping</h4>
+          </div>
+          
+          <p className="text-[11px] text-neutral-400 leading-relaxed">
+            Drag the four corner handles in the editor to wrap this name plate over angled number plates.
+          </p>
+
+          <div className="space-y-2 pt-1">
+            <button
+              type="button"
+              onClick={onResetPerspective}
+              className="w-full py-2 px-3 text-xs font-semibold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 transition-all cursor-pointer"
+            >
+              Reset to Flat Rectangle
+            </button>
+            
+            <button
+              type="button"
+              onClick={onCopyPreviousShape}
+              disabled={!hasOtherPerspectivePlates}
+              className="w-full py-2 px-3 text-xs font-semibold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 disabled:opacity-30 disabled:hover:bg-neutral-900 disabled:hover:text-neutral-500 transition-all cursor-pointer"
+              title="Copy quadrilateral shape from another perspective plate"
+            >
+              Copy Shape from Prev Plate
+            </button>
+          </div>
+
+          <div className="border-t border-neutral-850 pt-2.5 space-y-1.5 text-[10px] text-neutral-500 leading-relaxed">
+            <span className="font-bold text-neutral-400 block uppercase tracking-widest">Keyboard shortcuts</span>
+            <p>• Click a corner handle to select it</p>
+            <p>• Use <b>Arrow Keys</b> to nudge by 1 pixel</p>
+            <p>• Use <b>Shift + Arrow Keys</b> to nudge by 10 pixels</p>
+            <p>• Drag the plate itself to move all corners together</p>
+          </div>
+        </div>
+      ) : null}
+
       {/* Style Presets */}
-      <div className="space-y-2">
+      <div className="space-y-2 border-t border-neutral-800 pt-3">
         <label className="text-xs font-semibold text-neutral-400">Quick Style Presets</label>
         <div className="grid grid-cols-3 gap-2">
           {PLATE_PRESETS.map((preset, index) => {
@@ -99,16 +185,13 @@ export default function PlateSettings({
           <label className="text-[10px] font-semibold text-neutral-400 block truncate">
             Background
           </label>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <input
               type="color"
               value={options.backgroundColor}
               onChange={(e) => handleColorChange('backgroundColor', e.target.value)}
-              className="w-8 h-8 rounded border border-neutral-800 bg-transparent cursor-pointer overflow-hidden p-0"
+              className="w-7 h-7 rounded border border-neutral-800 bg-transparent cursor-pointer overflow-hidden p-0"
             />
-            <span className="text-[10px] text-neutral-500 font-mono hidden sm:inline uppercase">
-              {options.backgroundColor}
-            </span>
           </div>
         </div>
 
@@ -116,16 +199,13 @@ export default function PlateSettings({
           <label className="text-[10px] font-semibold text-neutral-400 block truncate">
             Text Color
           </label>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <input
               type="color"
               value={options.textColor}
               onChange={(e) => handleColorChange('textColor', e.target.value)}
-              className="w-8 h-8 rounded border border-neutral-800 bg-transparent cursor-pointer overflow-hidden p-0"
+              className="w-7 h-7 rounded border border-neutral-800 bg-transparent cursor-pointer overflow-hidden p-0"
             />
-            <span className="text-[10px] text-neutral-500 font-mono hidden sm:inline uppercase">
-              {options.textColor}
-            </span>
           </div>
         </div>
 
@@ -133,16 +213,13 @@ export default function PlateSettings({
           <label className="text-[10px] font-semibold text-neutral-400 block truncate">
             Border Color
           </label>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <input
               type="color"
               value={options.borderColor}
               onChange={(e) => handleColorChange('borderColor', e.target.value)}
-              className="w-8 h-8 rounded border border-neutral-800 bg-transparent cursor-pointer overflow-hidden p-0"
+              className="w-7 h-7 rounded border border-neutral-800 bg-transparent cursor-pointer overflow-hidden p-0"
             />
-            <span className="text-[10px] text-neutral-500 font-mono hidden sm:inline uppercase">
-              {options.borderColor}
-            </span>
           </div>
         </div>
       </div>
@@ -200,25 +277,27 @@ export default function PlateSettings({
           />
         </div>
 
-        {/* Rotation */}
-        <div className="space-y-1">
-          <div className="flex justify-between text-xs">
-            <span className="text-neutral-400 flex items-center gap-1">
-              <RefreshCw className="w-3 h-3 text-neutral-500" />
-              Rotation
-            </span>
-            <span className="font-semibold text-neutral-300">{options.rotation}°</span>
+        {/* Rotation - Hidden in perspective mode as it makes no sense */}
+        {plateMode === 'standard' && (
+          <div className="space-y-1 animate-fade-in">
+            <div className="flex justify-between text-xs">
+              <span className="text-neutral-400 flex items-center gap-1">
+                <RefreshCw className="w-3 h-3 text-neutral-500" />
+                Rotation
+              </span>
+              <span className="font-semibold text-neutral-300">{options.rotation}°</span>
+            </div>
+            <input
+              type="range"
+              min={-180}
+              max={180}
+              step={1}
+              value={options.rotation}
+              onChange={(e) => handleSliderChange('rotation', parseInt(e.target.value))}
+              className="w-full h-1.5 bg-neutral-950 rounded-lg appearance-none cursor-pointer accent-red-650"
+            />
           </div>
-          <input
-            type="range"
-            min={-180}
-            max={180}
-            step={1}
-            value={options.rotation}
-            onChange={(e) => handleSliderChange('rotation', parseInt(e.target.value))}
-            className="w-full h-1.5 bg-neutral-950 rounded-lg appearance-none cursor-pointer accent-red-650"
-          />
-        </div>
+        )}
       </div>
 
       {/* Shadow Option */}
