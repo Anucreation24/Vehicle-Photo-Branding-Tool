@@ -338,7 +338,13 @@ export default function BrandingEditorClient() {
           });
         } else {
           const flatCanvas = renderFlatPlateCanvas(plateState.plateOptions, imageMetadata.width, imageMetadata.height);
+          if (!hasVisiblePixels(flatCanvas)) {
+            throw new Error(`Flat plate source is empty during state restoration for plate: ${plateState.id}`);
+          }
           const warpedCanvas = warpCanvasPerspective(flatCanvas, plateState.corners!);
+          if (warpedCanvas.width <= 1 || warpedCanvas.height <= 1 || !hasVisiblePixels(warpedCanvas)) {
+            throw new Error(`Warped plate result is empty during state restoration for plate: ${plateState.id}`);
+          }
           
           const minX = Math.min(...plateState.corners!.map((p) => p.x));
           const minY = Math.min(...plateState.corners!.map((p) => p.y));
@@ -823,12 +829,7 @@ export default function BrandingEditorClient() {
         } else {
           // Perspective Warp Update in-place on persistent object (Section 3 & 4)
           const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-          try {
-            const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
-            activeObject.setElement(warpedCanvas);
-          } catch (e) {
-            console.error('Warp failed on option change:', e);
-          }
+          safelyApplyWarpedElement(activeObject, flatCanvas, activeObject.corners);
           if (updated.opacity !== undefined) {
             activeObject.set({ opacity: updated.opacity });
           }
@@ -934,8 +935,91 @@ export default function BrandingEditorClient() {
   // VERSION 2 - PERSPECTIVE SHAPE CONTROLS & EVENT BINDINGS
   // ==================================================
   
-  // Helper to extract 4 transformed corner points from standard plate bounding box
+  // Helper to verify that canvas contains non-transparent pixels (Section 2)
+  const hasVisiblePixels = (canvas: HTMLCanvasElement): boolean => {
+    const ctx = canvas.getContext('2d', {
+      willReadFrequently: true,
+    });
+
+    if (!ctx || canvas.width < 1 || canvas.height < 1) {
+      return false;
+    }
+
+    try {
+      const pixels = ctx.getImageData(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      ).data;
+
+      for (let i = 3; i < pixels.length; i += 4) {
+        if (pixels[i] > 0) return true;
+      }
+    } catch (e) {
+      console.warn('hasVisiblePixels read failed:', e);
+    }
+    return false;
+  };
+
+  // Reusable helper to safely apply warped element after validation (Section 5)
+  const safelyApplyWarpedElement = (
+    plateObject: any,
+    flatCanvas: HTMLCanvasElement,
+    corners: Point[]
+  ): boolean => {
+    if (!hasVisiblePixels(flatCanvas)) {
+      console.error('Flat plate source is empty.');
+      return false;
+    }
+
+    try {
+      const warpedCanvas = warpCanvasPerspective(
+        flatCanvas,
+        corners
+      );
+
+      if (
+        warpedCanvas.width <= 1 ||
+        warpedCanvas.height <= 1 ||
+        !hasVisiblePixels(warpedCanvas)
+      ) {
+        console.error('Warped plate result is empty.');
+        return false;
+      }
+
+      plateObject.setElement(warpedCanvas);
+      plateObject.set({
+        visible: true,
+        opacity: plateObject.plateOptions?.opacity ?? 1.0,
+      });
+      plateObject.dirty = true;
+      plateObject.setCoords();
+
+      return true;
+    } catch (e) {
+      console.error('Perspective warp failed inside safelyApplyWarpedElement:', e);
+      return false;
+    }
+  };
+
+  // Helper to extract 4 transformed corner points from standard plate bounding box (Section 7)
   const getPlateCorners = (obj: any): Point[] => {
+    const coords = obj.getCoords();
+    if (coords && coords.length === 4) {
+      const mapped = [
+        { x: coords[0].x, y: coords[0].y }, // tl
+        { x: coords[1].x, y: coords[1].y }, // tr
+        { x: coords[2].x, y: coords[2].y }, // br
+        { x: coords[3].x, y: coords[3].y }, // bl
+      ];
+      const isFinitePoint = (p: Point) => Number.isFinite(p.x) && Number.isFinite(p.y);
+      if (mapped.every(isFinitePoint)) {
+        return mapped;
+      }
+    }
+
+    // Fallback manual calculation if getCoords() fails or has non-finite values
     const cx = obj.left;
     const cy = obj.top;
     const w = obj.width * obj.scaleX;
@@ -950,10 +1034,10 @@ export default function BrandingEditorClient() {
     });
 
     return [
-      getRotatedPoint(-w / 2, -h / 2), // TL
-      getRotatedPoint(w / 2, -h / 2),  // TR
-      getRotatedPoint(w / 2, h / 2),   // BR
-      getRotatedPoint(-w / 2, h / 2),  // BL
+      getRotatedPoint(-w / 2, -h / 2), // tl
+      getRotatedPoint(w / 2, -h / 2),  // tr
+      getRotatedPoint(w / 2, h / 2),   // br
+      getRotatedPoint(-w / 2, h / 2),  // bl
     ];
   };
 
@@ -973,22 +1057,21 @@ export default function BrandingEditorClient() {
         // Switch standard flat plate to perspective warped in-place on same object
         const corners = getPlateCorners(activeObject);
 
+        // ==================================================
+        // 4. PROTECT handlePlateModeChange() (Section 4)
+        // ==================================================
         const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-        let warpedCanvas: HTMLCanvasElement;
-        try {
-          warpedCanvas = warpCanvasPerspective(flatCanvas, corners);
-        } catch (err) {
-          console.error('Initial warp failed:', err);
-          alert('Perspective preview could not be created. Please ensure the plate is flat and visible.');
+        
+        const minX = Math.min(...corners.map((p) => p.x));
+        const minY = Math.min(...corners.map((p) => p.y));
+
+        const ok = safelyApplyWarpedElement(activeObject, flatCanvas, corners);
+        if (!ok) {
+          alert('Perspective preview could not be created. Warp result failed validation.');
           isSyncingRef.current = false;
           return;
         }
 
-        const minX = Math.min(...corners.map((p) => p.x));
-        const minY = Math.min(...corners.map((p) => p.y));
-
-        // Update the existing activeObject in-place! No visibility changes, no deletions!
-        activeObject.setElement(warpedCanvas);
         activeObject.corners = corners;
         activeObject.plateMode = 'perspective';
         
@@ -1054,9 +1137,9 @@ export default function BrandingEditorClient() {
           topRight: corners[1],
           bottomRight: corners[2],
           bottomLeft: corners[3],
-          boundingBox: { minX, minY, width: warpedCanvas.width, height: warpedCanvas.height },
-          previewCanvasWidth: warpedCanvas.width,
-          previewCanvasHeight: warpedCanvas.height,
+          boundingBox: { minX, minY, width: (activeObject.getElement() as HTMLCanvasElement).width, height: (activeObject.getElement() as HTMLCanvasElement).height },
+          previewCanvasWidth: (activeObject.getElement() as HTMLCanvasElement).width,
+          previewCanvasHeight: (activeObject.getElement() as HTMLCanvasElement).height,
           previewObjectLeft: activeObject.left,
           previewObjectTop: activeObject.top,
           previewObjectWidth: activeObject.width,
@@ -1169,12 +1252,7 @@ export default function BrandingEditorClient() {
     
     // Re-warp back to backup corners
     const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-    try {
-      const warpedCanvas = warpCanvasPerspective(flatCanvas, activeObject.corners);
-      activeObject.setElement(warpedCanvas);
-    } catch (e) {
-      console.error('Cancel warp failed:', e);
-    }
+    safelyApplyWarpedElement(activeObject, flatCanvas, activeObject.corners);
 
     const minX = Math.min(...activeObject.corners.map((p: Point) => p.x));
     const minY = Math.min(...activeObject.corners.map((p: Point) => p.y));
@@ -1218,12 +1296,7 @@ export default function BrandingEditorClient() {
     activeObject.corners = resetCorners;
 
     const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-    try {
-      const warpedCanvas = warpCanvasPerspective(flatCanvas, resetCorners);
-      activeObject.setElement(warpedCanvas);
-    } catch (e) {
-      console.error('Reset warp failed:', e);
-    }
+    safelyApplyWarpedElement(activeObject, flatCanvas, resetCorners);
 
     const minX = Math.min(...resetCorners.map((p) => p.x));
     const minY = Math.min(...resetCorners.map((p) => p.y));
@@ -1282,8 +1355,7 @@ export default function BrandingEditorClient() {
       activeObject.corners = offsetCorners;
 
       const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
-      const warpedCanvas = warpCanvasPerspective(flatCanvas, offsetCorners);
-      activeObject.setElement(warpedCanvas);
+      safelyApplyWarpedElement(activeObject, flatCanvas, offsetCorners);
 
       const minX = Math.min(...offsetCorners.map((p) => p.x));
       const minY = Math.min(...offsetCorners.map((p) => p.y));
@@ -1346,7 +1418,15 @@ export default function BrandingEditorClient() {
       }));
 
       const flatCanvas = renderFlatPlateCanvas(options, imageMetadata.width, imageMetadata.height);
+      if (!hasVisiblePixels(flatCanvas)) {
+        alert('Could not duplicate plate: Flat plate source is empty.');
+        return;
+      }
       const warpedCanvas = warpCanvasPerspective(flatCanvas, offsetCorners);
+      if (warpedCanvas.width <= 1 || warpedCanvas.height <= 1 || !hasVisiblePixels(warpedCanvas)) {
+        alert('Could not duplicate plate: Warped plate result is empty.');
+        return;
+      }
 
       const clone = new FabricImage(warpedCanvas, {
         opacity: activeObject.opacity,
@@ -1465,8 +1545,7 @@ export default function BrandingEditorClient() {
 
           // Double buffer: warp preview offscreen and swap in-place
           const flatCanvas = renderFlatPlateCanvas(plateObj.plateOptions, bgImageElementRef.current!.naturalWidth, bgImageElementRef.current!.naturalHeight);
-          const warpedCanvas = warpCanvasPerspective(flatCanvas, corners);
-          plateObj.setElement(warpedCanvas);
+          safelyApplyWarpedElement(plateObj, flatCanvas, corners);
 
           const minX = Math.min(...corners.map((p) => p.x));
           const minY = Math.min(...corners.map((p) => p.y));
@@ -1481,7 +1560,7 @@ export default function BrandingEditorClient() {
 
           // Render active handles on top
           handles.forEach((h, hIdx) => {
-            h.set({ fill: activeCornerIndex === hIdx ? '#8B0000' : '#FFFFFF' });
+            h.set({ fill: hIdx === index ? '#8B0000' : '#FFFFFF' });
             canvas.bringObjectToFront(h);
           });
 
@@ -1768,8 +1847,7 @@ export default function BrandingEditorClient() {
               plate.corners[idx].y = nextY;
 
               const flatCanvas = renderFlatPlateCanvas(plate.plateOptions, bgImageElementRef.current!.naturalWidth, bgImageElementRef.current!.naturalHeight);
-              const warpedCanvas = warpCanvasPerspective(flatCanvas, plate.corners);
-              plate.setElement(warpedCanvas);
+              safelyApplyWarpedElement(plate, flatCanvas, plate.corners);
 
               const minX = Math.min(...plate.corners.map((p: any) => p.x));
               const minY = Math.min(...plate.corners.map((p: any) => p.y));

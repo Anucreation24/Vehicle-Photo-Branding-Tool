@@ -1,4 +1,4 @@
-import { Canvas, FabricImage, Group } from 'fabric';
+import { Canvas, StaticCanvas, FabricImage, Group } from 'fabric';
 import { ExportPreset, ExportFormat, ExportQuality, FitMethod, WatermarkOptions, ImageMetadata, Point } from '../types';
 import { createNamePlate, getWatermarkCoords } from './canvasHelpers';
 import { warpCanvasPerspective } from './perspectiveWarp';
@@ -22,40 +22,76 @@ export function renderFlatPlateCanvas(
   originalWidth: number,
   originalHeight: number
 ): HTMLCanvasElement {
-  // 1. Create flat plate group using helper
-  const plateGroup = createNamePlate(plateOptions, originalWidth, originalHeight);
+  const plateGroup = createNamePlate(
+    plateOptions,
+    originalWidth,
+    originalHeight
+  );
 
-  // 2. Determine bounds of the flat plate
-  const flatWidth = Math.ceil(plateGroup.width);
-  const flatHeight = Math.ceil(plateGroup.height);
+  const flatWidth = Math.max(
+    1,
+    Math.ceil(plateGroup.getScaledWidth())
+  );
 
-  const flatCanvasElement = document.createElement('canvas');
-  flatCanvasElement.width = flatWidth;
-  flatCanvasElement.height = flatHeight;
+  const flatHeight = Math.max(
+    1,
+    Math.ceil(plateGroup.getScaledHeight())
+  );
 
-  // 3. Create a static canvas to render it
-  const tempStaticCanvas = new Canvas(flatCanvasElement, {
+  const workingElement = document.createElement('canvas');
+
+  const tempCanvas = new StaticCanvas(workingElement, {
     width: flatWidth,
     height: flatHeight,
+    enableRetinaScaling: false,
+    renderOnAddRemove: false,
   });
 
-  // Center plate group in canvas
   plateGroup.set({
     left: flatWidth / 2,
     top: flatHeight / 2,
-    angle: 0, // Draw unrotated
+    originX: 'center',
+    originY: 'center',
+    angle: 0,
     scaleX: 1,
     scaleY: 1,
-    shadow: null, // Apply shadow at the warp level or keep it flat
+    shadow: null,
+    visible: true,
+    opacity: 1,
   });
 
-  tempStaticCanvas.add(plateGroup);
-  tempStaticCanvas.renderAll();
+  plateGroup.setCoords();
+  tempCanvas.add(plateGroup);
+  tempCanvas.renderAll();
 
-  // Clean up
-  tempStaticCanvas.dispose();
+  // IMPORTANT:
+  // Make a separate stable bitmap copy before disposing Fabric.
+  const snapshot = document.createElement('canvas');
+  snapshot.width = flatWidth;
+  snapshot.height = flatHeight;
 
-  return flatCanvasElement;
+  const snapshotContext = snapshot.getContext('2d');
+
+  if (!snapshotContext) {
+    tempCanvas.dispose();
+    throw new Error(
+      'Unable to create the flat plate snapshot context.'
+    );
+  }
+
+  snapshotContext.clearRect(0, 0, flatWidth, flatHeight);
+  snapshotContext.drawImage(
+    tempCanvas.getElement(),
+    0,
+    0,
+    flatWidth,
+    flatHeight
+  );
+
+  tempCanvas.dispose();
+
+  // Return the independent snapshot, not the disposed Fabric element.
+  return snapshot;
 }
 
 /**
@@ -102,7 +138,7 @@ export async function generateExportDataUrl(
   tempCanvasElement.height = targetHeight;
 
   // Opacity check for background
-  const tempCanvas = new Canvas(tempCanvasElement, {
+  const tempCanvas = new StaticCanvas(tempCanvasElement, {
     width: targetWidth,
     height: targetHeight,
     backgroundColor: preset === 'original' ? undefined : backgroundColor,

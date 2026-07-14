@@ -121,8 +121,29 @@ export function warpCanvasPerspective(
   sourceCanvas: HTMLCanvasElement,
   corners: Point[]
 ): HTMLCanvasElement {
+  // 1. Verify exactly four corners
+  if (!corners || corners.length !== 4) {
+    throw new Error('Perspective homography requires exactly four corner points.');
+  }
+
+  // 2. Verify all coordinates are finite numbers
+  const isFinitePoint = (pt: Point) => Number.isFinite(pt.x) && Number.isFinite(pt.y);
+  if (!corners.every(isFinitePoint)) {
+    throw new Error('Perspective homography contains non-finite corner coordinates.');
+  }
+
   const srcW = sourceCanvas.width;
   const srcH = sourceCanvas.height;
+
+  // 3. Verify source canvas is valid
+  if (srcW <= 0 || srcH <= 0) {
+    throw new Error(`Invalid source canvas dimensions: ${srcW}x${srcH}`);
+  }
+
+  // 4. Verify quadrilateral is convex
+  if (!isConvex(corners)) {
+    throw new Error('Perspective homography corners do not form a convex quadrilateral.');
+  }
 
   // Bounding box of destination quadrilateral
   const minX = Math.min(...corners.map((p) => p.x));
@@ -133,19 +154,29 @@ export function warpCanvasPerspective(
   const bboxW = Math.max(1, Math.ceil(maxX - minX));
   const bboxH = Math.max(1, Math.ceil(maxY - minY));
 
+  // 5. Cap size to prevent memory allocation failures
+  const MAX_BBOX_DIM = 8000;
+  if (bboxW > MAX_BBOX_DIM || bboxH > MAX_BBOX_DIM) {
+    throw new Error(`Perspective bounding box dimensions exceed safety cap: ${bboxW}x${bboxH}`);
+  }
+
   // Destination canvas
   const destCanvas = document.createElement('canvas');
   destCanvas.width = bboxW;
   destCanvas.height = bboxH;
   const destCtx = destCanvas.getContext('2d');
-  if (!destCtx) return destCanvas;
+  if (!destCtx) {
+    throw new Error('Could not create destination canvas 2d context.');
+  }
 
   const destImageData = destCtx.createImageData(bboxW, bboxH);
   const destData = destImageData.data;
 
   // Get source image data
   const srcCtx = sourceCanvas.getContext('2d');
-  if (!srcCtx) return destCanvas;
+  if (!srcCtx) {
+    throw new Error('Could not create source canvas 2d context.');
+  }
   const srcImageData = srcCtx.getImageData(0, 0, srcW, srcH);
   const srcData = srcImageData.data;
 
@@ -162,9 +193,12 @@ export function warpCanvasPerspective(
   let h: number[];
   try {
     h = solveHomography(corners, flatCorners);
-  } catch (err) {
-    // If singular, return blank canvas
-    return destCanvas;
+  } catch (error) {
+    throw new Error(
+      `Perspective homography failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
 
   // Iterate over destination bounding box
