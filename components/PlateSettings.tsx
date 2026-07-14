@@ -1,35 +1,40 @@
 import React from 'react';
-import { PlateOptions, PLATE_PRESETS, PlatePreset, PlateMode } from '../types';
-import { Type, RefreshCw, Palette, Maximize, Move, HelpCircle, Copy, RotateCcw } from 'lucide-react';
+import { PlateOptions, PLATE_PRESETS, PlatePreset, PlateGeometry } from '../types';
+import {
+  Type,
+  RefreshCw,
+  Palette,
+  ArrowUp,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  Maximize2,
+  Minimize2,
+  RotateCcw,
+  RotateCw,
+  Compass,
+} from 'lucide-react';
 
 interface PlateSettingsProps {
   options: PlateOptions;
-  plateMode: PlateMode;
-  isAdjustingPerspective: boolean;
-  onChangeMode: (mode: PlateMode) => void;
-  onToggleAdjustPerspective: () => void;
-  onApplyAdjust: () => void;
-  onCancelAdjust: () => void;
-  onResetToRectangle: () => void;
-  onCopyPreviousShape: () => void;
-  hasSavedShape: boolean;
+  geometry: PlateGeometry | null;
+  onNudge: (action: string) => void;
+  onUpdateGeometry: (geom: Partial<PlateGeometry>) => void;
   onChange: (options: Partial<PlateOptions>) => void;
   onApplyPreset: (preset: PlatePreset) => void;
+  onReDetectAngle?: () => void;
+  isWarpedPlate?: boolean;
 }
 
 export default function PlateSettings({
   options,
-  plateMode,
-  isAdjustingPerspective,
-  onChangeMode,
-  onToggleAdjustPerspective,
-  onApplyAdjust,
-  onCancelAdjust,
-  onResetToRectangle,
-  onCopyPreviousShape,
-  hasSavedShape,
+  geometry,
+  onNudge,
+  onUpdateGeometry,
   onChange,
   onApplyPreset,
+  onReDetectAngle,
+  isWarpedPlate = false,
 }: PlateSettingsProps) {
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     onChange({ text: e.target.value });
@@ -50,118 +55,192 @@ export default function PlateSettings({
   return (
     <div className="w-full bg-neutral-900 border border-neutral-800 rounded-xl p-4 shadow-lg space-y-4">
       {/* Header */}
-      <div className="flex items-center gap-2 border-b border-neutral-800 pb-3">
+      <div className="flex items-center gap-2 border-b border-neutral-850 pb-3">
         <Palette className="w-4 h-4 text-red-500" />
         <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-          Name Plate Settings
+          Plate Designer
         </h3>
       </div>
 
-      {/* Editing Mode Selection */}
-      <div className="space-y-1.5">
-        <label className="text-xs font-semibold text-neutral-400">Editing Mode</label>
-        <div className="grid grid-cols-2 gap-2 bg-neutral-950 p-1 rounded-lg border border-neutral-850">
-          <button
-            type="button"
-            onClick={() => onChangeMode('standard')}
-            className={`py-1.5 px-3 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5
-              ${
-                plateMode === 'standard'
-                  ? 'bg-neutral-800 text-white shadow-sm'
-                  : 'text-neutral-500 hover:text-neutral-300'
-              }`}
-          >
-            <Move className="w-3.5 h-3.5" />
-            Standard
-          </button>
-          <button
-            type="button"
-            onClick={() => onChangeMode('perspective')}
-            className={`py-1.5 px-3 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5
-              ${
-                plateMode === 'perspective'
-                  ? 'bg-red-950 text-red-400 border border-red-900/40 shadow-sm'
-                  : 'text-neutral-500 hover:text-neutral-300'
-              }`}
-          >
-            <Maximize className="w-3.5 h-3.5" />
-            Perspective
-          </button>
-        </div>
-      </div>
-
-      {/* Mode Specific Controls */}
-      {plateMode === 'perspective' && (
-        <div className="space-y-3 bg-neutral-950/40 border border-neutral-850/60 p-3.5 rounded-xl animate-fade-in">
-          <div className="flex items-center gap-2 text-red-400">
-            <Maximize className="w-4 h-4 shrink-0" />
-            <h4 className="text-xs font-bold uppercase tracking-wider">Perspective Adjustment</h4>
+      {/* 10. Precise Correction Controls & Nudges */}
+      {geometry ? (
+        <div className="space-y-3 bg-neutral-950 p-3.5 rounded-xl border border-neutral-850">
+          <div className="flex items-center justify-between text-xs font-bold text-neutral-300 border-b border-neutral-850 pb-2">
+            <span>POSITION & SIZE</span>
+            {isWarpedPlate && (
+              <span className="text-[10px] text-red-400 font-semibold uppercase bg-red-950 px-1.5 py-0.5 rounded">
+                Perspective
+              </span>
+            )}
           </div>
-          
-          <p className="text-[11px] text-neutral-400 leading-relaxed">
-            Warp this name plate over angled number plates. Corner handles can be adjusted in **Adjust Mode**.
-          </p>
 
-          <div className="space-y-2 pt-1">
-            {!isAdjustingPerspective ? (
+          {/* Numeric Fields / Sliders */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <label className="text-neutral-500 block mb-1">Position X</label>
+              <input
+                type="number"
+                value={geometry.left}
+                onChange={(e) => onUpdateGeometry({ left: parseInt(e.target.value) || 0 })}
+                className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-white font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-neutral-500 block mb-1">Position Y</label>
+              <input
+                type="number"
+                value={geometry.top}
+                onChange={(e) => onUpdateGeometry({ top: parseInt(e.target.value) || 0 })}
+                className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-white font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-neutral-500 block mb-1">Width</label>
+              <input
+                type="number"
+                value={geometry.width}
+                min={20}
+                onChange={(e) => onUpdateGeometry({ width: parseInt(e.target.value) || 20 })}
+                className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-white font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-neutral-500 block mb-1">Height</label>
+              <input
+                type="number"
+                value={geometry.height}
+                min={10}
+                onChange={(e) => onUpdateGeometry({ height: parseInt(e.target.value) || 10 })}
+                className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-white font-mono"
+              />
+            </div>
+          </div>
+
+          {/* Rotation Slider */}
+          <div className="space-y-1 pt-1">
+            <div className="flex justify-between text-[11px] text-neutral-400">
+              <span>Rotation</span>
+              <span>{geometry.rotation}°</span>
+            </div>
+            <input
+              type="range"
+              min={-180}
+              max={180}
+              step={1}
+              value={geometry.rotation}
+              onChange={(e) => onUpdateGeometry({ rotation: parseInt(e.target.value) })}
+              className="w-full h-1 bg-neutral-900 rounded-lg appearance-none cursor-pointer accent-red-650"
+            />
+          </div>
+
+          {/* Nudge Buttons Grid */}
+          <div className="space-y-1.5 pt-2 border-t border-neutral-850">
+            <label className="text-[10px] font-bold text-neutral-500 uppercase block tracking-wider">
+              Quick Nudges
+            </label>
+            <div className="grid grid-cols-5 gap-1.5">
+              {/* Position Nudges */}
               <button
                 type="button"
-                onClick={onToggleAdjustPerspective}
-                className="w-full py-2 px-3 text-xs font-bold rounded-lg bg-red-700 hover:bg-red-650 text-white transition-all cursor-pointer shadow-md flex items-center justify-center gap-1.5"
+                onClick={() => onNudge('left')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Move Left"
               >
-                <Maximize className="w-3.5 h-3.5" />
-                Adjust Corners
+                <ArrowLeft className="w-3.5 h-3.5" />
               </button>
-            ) : (
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={onApplyAdjust}
-                  className="py-2 px-3 text-xs font-bold rounded-lg bg-green-700 hover:bg-green-650 text-white transition-all cursor-pointer shadow-md"
-                >
-                  Apply
-                </button>
-                <button
-                  type="button"
-                  onClick={onCancelAdjust}
-                  className="py-2 px-3 text-xs font-bold rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 transition-all cursor-pointer"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
+              <button
+                type="button"
+                onClick={() => onNudge('right')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Move Right"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onNudge('up')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Move Up"
+              >
+                <ArrowUp className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onNudge('down')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Move Down"
+              >
+                <ArrowDown className="w-3.5 h-3.5" />
+              </button>
 
-            <button
-              type="button"
-              onClick={onResetToRectangle}
-              className="w-full py-1.5 px-3 text-xs font-semibold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 transition-all cursor-pointer flex items-center justify-center gap-1.5"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Reset to Rectangle
-            </button>
-            
-            <button
-              type="button"
-              onClick={onCopyPreviousShape}
-              disabled={!hasSavedShape}
-              className="w-full py-1.5 px-3 text-xs font-semibold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 disabled:opacity-30 disabled:hover:bg-neutral-900 disabled:hover:text-neutral-500 transition-all cursor-pointer flex items-center justify-center gap-1.5"
-              title="Copy quadrilateral shape from another perspective plate"
-            >
-              <Copy className="w-3.5 h-3.5" />
-              Copy Previous Shape
-            </button>
+              {/* Rotation Nudges */}
+              <button
+                type="button"
+                onClick={() => onNudge('rotate-left')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Rotate CCW"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+
+              {/* Dimension Nudges */}
+              <button
+                type="button"
+                onClick={() => onNudge('wider')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Make Wider"
+              >
+                <span className="text-[10px] font-bold">W+</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNudge('narrower')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Make Narrower"
+              >
+                <span className="text-[10px] font-bold">W-</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNudge('taller')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Make Taller"
+              >
+                <span className="text-[10px] font-bold">H+</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNudge('shorter')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Make Shorter"
+              >
+                <span className="text-[10px] font-bold">H-</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onNudge('rotate-right')}
+                className="p-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer flex items-center justify-center"
+                title="Rotate CW"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
-          <div className="border-t border-neutral-850 pt-2.5 space-y-1.5 text-[10px] text-neutral-500 leading-relaxed">
-            <span className="font-bold text-neutral-400 block uppercase tracking-widest flex items-center gap-1">
-              <HelpCircle className="w-3 h-3 text-red-500" /> Shortcuts & Instructions
-            </span>
-            <p>• Click **Adjust Corners** to edit individual points.</p>
-            <p>• Drag handles or use **Arrow Keys** (Shift for 10px) to nudge points.</p>
-            <p>• Drag inside the plate to move it as a single unit.</p>
-          </div>
+          {/* Re-detect plate angle button */}
+          {onReDetectAngle && (
+            <button
+              type="button"
+              onClick={onReDetectAngle}
+              className="w-full mt-2 py-2 px-3 text-xs font-bold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <Compass className="w-3.5 h-3.5 text-red-500 animate-pulse" />
+              Re-detect Plate Angle
+            </button>
+          )}
         </div>
-      )}
+      ) : null}
 
       {/* Style Presets */}
       <div className="space-y-2 border-t border-neutral-800 pt-3">
@@ -315,28 +394,6 @@ export default function PlateSettings({
             className="w-full h-1.5 bg-neutral-950 rounded-lg appearance-none cursor-pointer accent-red-650"
           />
         </div>
-
-        {/* Rotation - Hidden in perspective mode as it makes no sense */}
-        {plateMode === 'standard' && (
-          <div className="space-y-1 animate-fade-in">
-            <div className="flex justify-between text-xs">
-              <span className="text-neutral-400 flex items-center gap-1">
-                <RefreshCw className="w-3 h-3 text-neutral-500" />
-                Rotation
-              </span>
-              <span className="font-semibold text-neutral-300">{options.rotation}°</span>
-            </div>
-            <input
-              type="range"
-              min={-180}
-              max={180}
-              step={1}
-              value={options.rotation}
-              onChange={(e) => handleSliderChange('rotation', parseInt(e.target.value))}
-              className="w-full h-1.5 bg-neutral-950 rounded-lg appearance-none cursor-pointer accent-red-650"
-            />
-          </div>
-        )}
       </div>
 
       {/* Shadow Option */}

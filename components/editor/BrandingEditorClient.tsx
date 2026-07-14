@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Canvas, FabricImage, Group, Circle, Line, Point as FabricPoint } from 'fabric';
+import { Canvas, FabricImage, Group, Circle, Line, Point as FabricPoint, Rect, FabricText } from 'fabric';
 import {
   ImageMetadata,
   PlateOptions,
@@ -15,6 +15,7 @@ import {
   WatermarkPosition,
   PlateMode,
   Point,
+  PlateGeometry,
 } from '../../types';
 import {
   createNamePlate,
@@ -24,6 +25,8 @@ import {
 } from '../../lib/canvasHelpers';
 import { generateExportDataUrl, renderFlatPlateCanvas } from '../../lib/exportHelpers';
 import { warpCanvasPerspective, isConvex } from '../../lib/perspectiveWarp';
+import { loadOpenCV } from '../../lib/opencvLoader';
+import { checkModelExists, getDetectorSession, detectLicensePlates, DetectionResult } from '../../lib/plateDetector';
 import ImageUploader from '../ImageUploader';
 import EditorToolbar from '../EditorToolbar';
 import PlateSettings from '../PlateSettings';
@@ -140,6 +143,26 @@ export default function BrandingEditorClient() {
   const [redoStack, setRedoStack] = useState<SavedCanvasState[]>([]);
   const isSyncingRef = useRef(false);
 
+  // License Plate Detection & Manual Selection States
+  const [isManualSelecting, setIsManualSelecting] = useState<boolean>(false);
+  const [isDetecting, setIsDetecting] = useState<boolean>(false);
+  const [detectionStatus, setDetectionStatus] = useState<string>('');
+  const [detectedPlates, setDetectedPlates] = useState<DetectionResult[]>([]);
+  const [selectedDetectionId, setSelectedDetectionId] = useState<string | null>(null);
+  const [isModelMissing, setIsModelMissing] = useState<boolean>(false);
+  const [hideDetectionBoxes, setHideDetectionBoxes] = useState<boolean>(false);
+  const [cvLoaded, setCvLoaded] = useState<boolean>(false);
+
+  // Active object geometry tracker for sidebar sliders & inputs
+  const [activeGeometry, setActiveGeometry] = useState<PlateGeometry | null>(null);
+
+  // Manual selection dragging refs
+  const startXRef = useRef<number>(0);
+  const startYRef = useRef<number>(0);
+  const isDraggingRef = useRef<boolean>(false);
+  const tempSelectionRectRef = useRef<Rect | null>(null);
+  const isManualSelectingRef = useRef<boolean>(false);
+
   // ==================================================
   // 8. DEVELOPMENT SAFETY INVARIANT ASSERTION
   // ==================================================
@@ -164,13 +187,26 @@ export default function BrandingEditorClient() {
     }
   };
 
-  // Local Session Perspective Shape Persistence
+  // Local Session Perspective Shape Persistence & OpenCV Loading & Model Check
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('thennakoon_last_shape');
       if (saved) {
         setHasSavedShape(true);
       }
+
+      checkModelExists().then((exists) => {
+        setIsModelMissing(!exists);
+      });
+
+      loadOpenCV()
+        .then(() => {
+          setCvLoaded(true);
+          console.log('OpenCV.js initialized successfully.');
+        })
+        .catch((err) => {
+          console.warn('OpenCV.js could not be loaded:', err);
+        });
     }
   }, []);
 
@@ -679,6 +715,19 @@ export default function BrandingEditorClient() {
         handleSelectionChange(null);
       });
 
+      canvas.on('object:moving', () => updateGeometryState(canvas.getActiveObject()));
+      canvas.on('object:scaling', () => updateGeometryState(canvas.getActiveObject()));
+      canvas.on('object:rotating', () => updateGeometryState(canvas.getActiveObject()));
+      canvas.on('object:modified', () => {
+        updateGeometryState(canvas.getActiveObject());
+        pushToHistory();
+      });
+
+      // Mouse events for Manual Rectangle Selection (Section 9)
+      canvas.on('mouse:down', (opt) => handleCanvasMouseDown(opt));
+      canvas.on('mouse:move', (opt) => handleCanvasMouseMove(opt));
+      canvas.on('mouse:up', (opt) => handleCanvasMouseUp(opt));
+
       // Save initial state
       const initialSnap = captureCanvasStateSnapshot();
       if (initialSnap) {
@@ -720,9 +769,759 @@ export default function BrandingEditorClient() {
     };
   }, [imageUrl]); // Excluded editorZoom to prevent canvas disposes during zooming operations (Section 10)
 
+  // Update geometry state for sidebar controls (Section 10)
+  const updateGeometryState = (obj?: any) => {
+    const target = obj || (fabricCanvasRef.current ? fabricCanvasRef.current.getActiveObject() : null);
+    if (target && target.isNamePlate) {
+      setActiveGeometry({
+        left: Math.round(target.left),
+        top: Math.round(target.top),
+        width: Math.round(target.width * target.scaleX),
+        height: Math.round(target.height * target.scaleY),
+        rotation: Math.round(target.angle || 0),
+      });
+    } else {
+      setActiveGeometry(null);
+    }
+  };
+
+  // Nudge standard/warped plate settings (Section 10)
+  const handleNudge = (action: string) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !activeObject) return;
+
+    const step = 5; // standard 5px step
+    const scaleStep = 1.03; // 3% scaling step
+    const rotateStep = 3; // 3 degrees rotation step
+
+    if (action === 'left') {
+      activeObject.set({ left: activeObject.left - step });
+    } else if (action === 'right') {
+      activeObject.set({ left: activeObject.left + step });
+    } else if (action === 'up') {
+      activeObject.set({ top: activeObject.top - step });
+    } else if (action === 'down') {
+      activeObject.set({ top: activeObject.top + step });
+    } else if (action === 'wider') {
+      activeObject.set({ scaleX: activeObject.scaleX * scaleStep });
+    } else if (action === 'narrower') {
+      activeObject.set({ scaleX: activeObject.scaleX / scaleStep });
+    } else if (action === 'taller') {
+      activeObject.set({ scaleY: activeObject.scaleY * scaleStep });
+    } else if (action === 'shorter') {
+      activeObject.set({ scaleY: activeObject.scaleY / scaleStep });
+    } else if (action === 'rotate-left') {
+      activeObject.set({ angle: (activeObject.angle || 0) - rotateStep });
+    } else if (action === 'rotate-right') {
+      activeObject.set({ angle: (activeObject.angle || 0) + rotateStep });
+    }
+
+    // If it's a warped plate, nudge all corner coordinates as well to keep them in sync
+    if (activeObject.plateMode === 'perspective' && activeObject.corners) {
+      const dx = activeObject.left - (activeObject.lastLeft ?? activeObject.left);
+      const dy = activeObject.top - (activeObject.lastTop ?? activeObject.top);
+      activeObject.corners = activeObject.corners.map((p: Point) => ({
+        x: p.x + dx,
+        y: p.y + dy,
+      }));
+      activeObject.lastLeft = activeObject.left;
+      activeObject.lastTop = activeObject.top;
+    }
+
+    activeObject.setCoords();
+    canvas.renderAll();
+    updateGeometryState(activeObject);
+    pushToHistory();
+  };
+
+  // Precise numeric fields / input changes (Section 10)
+  const handleUpdateGeometry = (geom: Partial<PlateGeometry>) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !activeObject) return;
+
+    if (geom.left !== undefined) activeObject.set({ left: geom.left });
+    if (geom.top !== undefined) activeObject.set({ top: geom.top });
+    if (geom.rotation !== undefined) activeObject.set({ angle: geom.rotation });
+
+    if (geom.width !== undefined) {
+      const baseW = activeObject.width || 1200;
+      activeObject.set({ scaleX: geom.width / baseW });
+    }
+    if (geom.height !== undefined) {
+      const baseH = activeObject.height || 400;
+      activeObject.set({ scaleY: geom.height / baseH });
+    }
+
+    activeObject.setCoords();
+    canvas.renderAll();
+    updateGeometryState(activeObject);
+    pushToHistory();
+  };
+
+  // ==================================================
+  // 9. MANUAL RECTANGLE SELECTION FALLBACK (Section 9)
+  // ==================================================
+  const handleStartManualSelection = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    if (isPreviewActive) handleTogglePreview(false);
+
+    isManualSelectingRef.current = true;
+    setIsManualSelecting(true);
+    canvas.discardActiveObject();
+    canvas.defaultCursor = 'crosshair';
+
+    canvas.getObjects().forEach((obj) => {
+      obj.selectable = false;
+      obj.evented = false;
+    });
+
+    canvas.requestRenderAll();
+  };
+
+  const handleCancelManualSelection = () => {
+    isManualSelectingRef.current = false;
+    setIsManualSelecting(false);
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    canvas.defaultCursor = 'default';
+    canvas.getObjects().forEach((obj) => {
+      if ((obj as any).isNamePlate || (obj as any).isWatermark) {
+        obj.selectable = !isPreviewActive;
+        obj.evented = !isPreviewActive;
+      }
+    });
+
+    if (tempSelectionRectRef.current) {
+      canvas.remove(tempSelectionRectRef.current);
+      tempSelectionRectRef.current = null;
+    }
+    canvas.requestRenderAll();
+  };
+
+  const handleCanvasMouseDown = (opt: any) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !isManualSelectingRef.current) return;
+
+    const pointer = opt.scenePoint ?? opt.absolutePointer ?? { x: 0, y: 0 };
+    startXRef.current = pointer.x;
+    startYRef.current = pointer.y;
+    isDraggingRef.current = true;
+
+    // Create temporary selection rectangle
+    const rect = new Rect({
+      left: pointer.x,
+      top: pointer.y,
+      width: 0,
+      height: 0,
+      fill: 'rgba(255, 235, 59, 0.15)', // bright yellow transparent
+      stroke: '#FFEB3B', // bright yellow outline
+      strokeWidth: Math.max(1.5, 1.5 / displayScale),
+      selectable: false,
+      evented: false,
+      excludeFromExport: true,
+    });
+
+    tempSelectionRectRef.current = rect;
+    canvas.add(rect);
+    canvas.requestRenderAll();
+  };
+
+  const handleCanvasMouseMove = (opt: any) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !isManualSelectingRef.current || !isDraggingRef.current || !tempSelectionRectRef.current) return;
+
+    const pointer = opt.scenePoint ?? opt.absolutePointer ?? { x: 0, y: 0 };
+    const x = pointer.x;
+    const y = pointer.y;
+
+    const startX = startXRef.current;
+    const startY = startYRef.current;
+
+    const left = Math.min(startX, x);
+    const top = Math.min(startY, y);
+    const width = Math.abs(startX - x);
+    const height = Math.abs(startY - y);
+
+    tempSelectionRectRef.current.set({ left, top, width, height });
+    canvas.requestRenderAll();
+  };
+
+  const handleCanvasMouseUp = (opt: any) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !isManualSelectingRef.current) return;
+
+    isDraggingRef.current = false;
+    const rect = tempSelectionRectRef.current;
+
+    if (rect) {
+      canvas.remove(rect);
+      tempSelectionRectRef.current = null;
+
+      const width = rect.width;
+      const height = rect.height;
+      const left = rect.left;
+      const top = rect.top;
+
+      // Minimum rectangle size check: 15x15 pixels in original coordinates (Section 9)
+      if (width > 15 && height > 15) {
+        const cx = left + width / 2;
+        const cy = top + height / 2;
+
+        // Apply safety expansion (+6% width, +10% height) (Section 8)
+        const plateW = width * 1.06;
+        const plateH = height * 1.10;
+
+        createBrandedPlateAt(cx, cy, plateW, plateH);
+      }
+    }
+
+    handleCancelManualSelection();
+  };
+
+  // Helper to add branded plate over canvas coordinates (Section 8)
+  const createBrandedPlateAt = (
+    cx: number,
+    cy: number,
+    w: number,
+    h: number,
+    angle = 0,
+    corners: Point[] | null = null
+  ) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !imageMetadata) return;
+
+    const id = 'plate_' + Math.random().toString(36).substring(2, 11);
+
+    if (corners) {
+      const flatCanvas = renderFlatPlateCanvas(plateOptions, imageMetadata.width, imageMetadata.height);
+      const warpedCanvas = warpCanvasPerspective(flatCanvas, corners);
+      
+      const minX = Math.min(...corners.map(p => p.x));
+      const minY = Math.min(...corners.map(p => p.y));
+
+      const plate = new FabricImage(warpedCanvas, {
+        left: minX,
+        top: minY,
+        opacity: plateOptions.opacity,
+        selectable: true,
+        evented: true,
+        hasControls: true,
+        hasBorders: true,
+        originX: 'left',
+        originY: 'top',
+        transparentCorners: false,
+        cornerColor: '#8B0000',
+        cornerStrokeColor: '#FFFFFF',
+        borderColor: '#8B0000',
+        cornerSize: 12,
+      });
+
+      (plate as any).id = id;
+      (plate as any).isNamePlate = true;
+      (plate as any).plateMode = 'perspective';
+      (plate as any).plateOptions = { ...plateOptions };
+      (plate as any).corners = corners.map(p => ({ ...p }));
+      (plate as any).lastLeft = minX;
+      (plate as any).lastTop = minY;
+
+      plate.on('moving', () => {
+        const dx = plate.left - (plate as any).lastLeft;
+        const dy = plate.top - (plate as any).lastTop;
+        (plate as any).lastLeft = plate.left;
+        (plate as any).lastTop = plate.top;
+        (plate as any).corners = (plate as any).corners.map((p: Point) => ({
+          x: p.x + dx,
+          y: p.y + dy,
+        }));
+      });
+
+      canvas.add(plate);
+      canvas.setActiveObject(plate);
+      assertPlateVisible(plate);
+    } else {
+      const flatCanvas = renderFlatPlateCanvas(plateOptions, imageMetadata.width, imageMetadata.height);
+      const plate = new FabricImage(flatCanvas, {
+        left: cx,
+        top: cy,
+        originX: 'center',
+        originY: 'center',
+        opacity: plateOptions.opacity,
+        angle: angle,
+        selectable: true,
+        hasControls: true,
+        hasBorders: true,
+        transparentCorners: false,
+        cornerColor: '#8B0000',
+        cornerStrokeColor: '#FFFFFF',
+        borderColor: '#8B0000',
+        cornerSize: 12,
+      });
+
+      const flatW = flatCanvas.width;
+      const flatH = flatCanvas.height;
+      plate.set({
+        scaleX: w / flatW,
+        scaleY: h / flatH,
+      });
+
+      (plate as any).id = id;
+      (plate as any).isNamePlate = true;
+      (plate as any).plateMode = 'standard';
+      (plate as any).plateOptions = { ...plateOptions, rotation: angle };
+      (plate as any).corners = null;
+
+      canvas.add(plate);
+      canvas.setActiveObject(plate);
+      assertPlateVisible(plate);
+    }
+
+    canvas.renderAll();
+    updateGeometryState(canvas.getActiveObject());
+    pushToHistory();
+  };
+
+  // ==================================================
+  // 3 & 4. AUTOMATIC NUMBER PLATE DETECTION (Section 3 & 4)
+  // ==================================================
+  const drawDetectionBoxes = (detections: DetectionResult[]) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    clearDetectionBoxes();
+
+    detections.forEach((det) => {
+      const isBest = det.confidence === Math.max(...detections.map((d) => d.confidence));
+      
+      const rect = new Rect({
+        left: det.x,
+        top: det.y,
+        width: det.width,
+        height: det.height,
+        fill: 'rgba(0, 255, 0, 0.05)',
+        stroke: isBest ? '#22C55E' : '#EAB308',
+        strokeWidth: Math.max(3, 3 / displayScale),
+        selectable: true,
+        hasControls: false,
+        hasBorders: false,
+        excludeFromExport: true,
+      });
+
+      const textObj = new FabricText(`Plate (${Math.round(det.confidence * 100)}%)`, {
+        left: det.x,
+        top: Math.max(0, det.y - Math.max(24, 24 / displayScale)),
+        fontSize: Math.max(16, 16 / displayScale),
+        fill: isBest ? '#22C55E' : '#EAB308',
+        fontFamily: 'sans-serif',
+        fontWeight: 'bold',
+        backgroundColor: 'rgba(0, 0, 0, 0.75)',
+        selectable: false,
+        excludeFromExport: true,
+      });
+
+      (rect as any).isDetectionBox = true;
+      (rect as any).detectionId = det.id;
+      (rect as any).detectionData = det;
+      (rect as any).textLabel = textObj;
+
+      rect.on('mousedown', () => {
+        setSelectedDetectionId(det.id);
+        // Also select the plate associated with this detection if any
+      });
+
+      canvas.add(rect);
+      canvas.add(textObj);
+    });
+
+    canvas.requestRenderAll();
+  };
+
+  const clearDetectionBoxes = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    const toRemove = canvas.getObjects().filter(
+      (obj: any) =>
+        obj.isDetectionBox ||
+        (obj instanceof FabricText && obj.excludeFromExport && obj.text && obj.text.startsWith('Plate ('))
+    );
+    toRemove.forEach((obj) => canvas.remove(obj));
+    canvas.requestRenderAll();
+  };
+
+  const handleDetectNumberPlate = async () => {
+    const canvas = fabricCanvasRef.current;
+    const bgImg = bgImageElementRef.current;
+    if (!canvas || !bgImg) return;
+
+    if (isPreviewActive) handleTogglePreview(false);
+
+    setIsDetecting(true);
+    setSelectedDetectionId(null);
+    setDetectedPlates([]);
+    clearDetectionBoxes();
+
+    try {
+      const modelExists = await checkModelExists();
+      if (!modelExists) {
+        setIsModelMissing(true);
+        setIsDetecting(false);
+        setDetectionStatus('Model missing');
+        alert('Automatic detection is unavailable because the ONNX model file is missing from /public/models/license-plate-detector.onnx. Please place the model file in the public folder, or use Manual Rectangle Selection below.');
+        handleStartManualSelection();
+        return;
+      }
+
+      const session = await getDetectorSession((status) => setDetectionStatus(status));
+
+      setDetectionStatus('Analysing photo...');
+      const detections = await detectLicensePlates(bgImg, session, 0.40);
+
+      if (detections.length === 0) {
+        setIsDetecting(false);
+        setDetectionStatus('Detection failed');
+        alert('No number plate was detected. Draw a box around the number plate manually.');
+        handleStartManualSelection();
+        return;
+      }
+
+      setDetectedPlates(detections);
+      drawDetectionBoxes(detections);
+
+      // Select and brand the best plate
+      const bestDet = detections.reduce(
+        (best, cur) => (cur.confidence > best.confidence ? cur : best),
+        detections[0]
+      );
+      setSelectedDetectionId(bestDet.id);
+      applyBrandingToDetection(bestDet);
+
+      setIsDetecting(false);
+      setDetectionStatus('Plate detected');
+    } catch (err: any) {
+      console.error('Detection failed:', err);
+      setIsDetecting(false);
+      setDetectionStatus('Detection failed');
+      alert(`Automatic detection failed: ${err.message || err}. You can select the number plate manually.`);
+      handleStartManualSelection();
+    }
+  };
+
+  const applyBrandingToDetection = (det: DetectionResult) => {
+    const bgImg = bgImageElementRef.current;
+    if (!bgImg) return;
+
+    let corners: Point[] | null = null;
+    let angle = 0;
+
+    if (cvLoaded) {
+      const detectedCorners = detectPlateCornersOpenCV(bgImg, det);
+      if (detectedCorners && detectedCorners.length === 4) {
+        corners = expandQuadrilateral(detectedCorners, 1.06, 1.10);
+      } else {
+        angle = estimateRotationOpenCV(bgImg, det);
+      }
+    }
+
+    const cx = det.x + det.width / 2;
+    const cy = det.y + det.height / 2;
+    const w = det.width * 1.06;
+    const h = det.height * 1.10;
+
+    createBrandedPlateAt(cx, cy, w, h, angle, corners);
+  };
+
+  const handleBrandAllDetectedPlates = () => {
+    if (detectedPlates.length === 0) return;
+    
+    // Clear any existing name plates first
+    const canvas = fabricCanvasRef.current;
+    if (canvas) {
+      const existing = canvas.getObjects().filter((obj: any) => obj.isNamePlate);
+      existing.forEach(p => canvas.remove(p));
+    }
+
+    detectedPlates.forEach((det) => {
+      applyBrandingToDetection(det);
+    });
+  };
+
+  const sortCorners = (pts: Point[]): Point[] => {
+    const sorted = [...pts].sort((a, b) => a.x - b.x);
+    const left = [sorted[0], sorted[1]];
+    const right = [sorted[2], sorted[3]];
+
+    left.sort((a, b) => a.y - b.y);
+    const tl = left[0];
+    const bl = left[1];
+
+    right.sort((a, b) => a.y - b.y);
+    const tr = right[0];
+    const br = right[1];
+
+    return [tl, tr, br, bl];
+  };
+
+  const expandQuadrilateral = (pts: Point[], scaleW = 1.06, scaleH = 1.10): Point[] => {
+    const cx = pts.reduce((sum, p) => sum + p.x, 0) / 4;
+    const cy = pts.reduce((sum, p) => sum + p.y, 0) / 4;
+    return pts.map(p => ({
+      x: cx + (p.x - cx) * scaleW,
+      y: cy + (p.y - cy) * scaleH,
+    }));
+  };
+
+  const detectPlateCornersOpenCV = (
+    imgElement: HTMLImageElement,
+    box: { x: number; y: number; width: number; height: number }
+  ): Point[] | null => {
+    const cv = (window as any).cv;
+    if (!cv) return null;
+
+    try {
+      const marginW = box.width * 0.1;
+      const marginH = box.height * 0.1;
+
+      const cropX = Math.max(0, Math.floor(box.x - marginW));
+      const cropY = Math.max(0, Math.floor(box.y - marginH));
+      const cropW = Math.min(imgElement.naturalWidth - cropX, Math.ceil(box.width + 2 * marginW));
+      const cropH = Math.min(imgElement.naturalHeight - cropY, Math.ceil(box.height + 2 * marginH));
+
+      if (cropW < 5 || cropH < 5) return null;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = cropW;
+      canvas.height = cropH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(imgElement, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+      const src = cv.imread(canvas);
+      const gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+
+      const blurred = new cv.Mat();
+      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+
+      const thresh = new cv.Mat();
+      cv.adaptiveThreshold(blurred, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 11, 2);
+
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      let bestQuad: Point[] | null = null;
+      let maxArea = 0;
+
+      for (let i = 0; i < contours.size(); ++i) {
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if (area < (cropW * cropH) * 0.15) continue;
+
+        const approx = new cv.Mat();
+        const peri = cv.arcLength(cnt, true);
+        cv.approxPolyDP(cnt, approx, 0.025 * peri, true);
+
+        if (approx.rows === 4) {
+          if (cv.isContourConvex(approx)) {
+            const pts: Point[] = [];
+            for (let j = 0; j < 4; j++) {
+              pts.push({
+                x: approx.data32S[j * 2],
+                y: approx.data32S[j * 2 + 1]
+              });
+            }
+
+            const w1 = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+            const h1 = Math.hypot(pts[3].x - pts[0].x, pts[3].y - pts[0].y);
+            const aspect = w1 / h1;
+
+            if (aspect > 1.8 && aspect < 6.0) {
+              if (area > maxArea) {
+                maxArea = area;
+                bestQuad = pts;
+              }
+            }
+          }
+        }
+        approx.delete();
+      }
+
+      src.delete();
+      gray.delete();
+      blurred.delete();
+      thresh.delete();
+      contours.delete();
+      hierarchy.delete();
+
+      if (bestQuad) {
+        const sortedLocal = sortCorners(bestQuad);
+        return sortedLocal.map(p => ({
+          x: p.x + cropX,
+          y: p.y + cropY
+        }));
+      }
+    } catch (err) {
+      console.warn('OpenCV corner detection failed:', err);
+    }
+    return null;
+  };
+
+  const estimateRotationOpenCV = (
+    imgElement: HTMLImageElement,
+    box: { x: number; y: number; width: number; height: number }
+  ): number => {
+    const cv = (window as any).cv;
+    if (!cv) return 0;
+
+    try {
+      const cropX = Math.max(0, Math.floor(box.x));
+      const cropY = Math.max(0, Math.floor(box.y));
+      const cropW = Math.min(imgElement.naturalWidth - cropX, Math.ceil(box.width));
+      const cropH = Math.min(imgElement.naturalHeight - cropY, Math.ceil(box.height));
+
+      if (cropW < 5 || cropH < 5) return 0;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = cropW;
+      canvas.height = cropH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return 0;
+      ctx.drawImage(imgElement, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+      const src = cv.imread(canvas);
+      const gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+
+      const blurred = new cv.Mat();
+      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+
+      const edges = new cv.Mat();
+      cv.Canny(blurred, edges, 50, 150, 3, false);
+
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      let maxArea = 0;
+      let bestAngle = 0;
+
+      for (let i = 0; i < contours.size(); ++i) {
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if (area > maxArea && area > (cropW * cropH) * 0.15) {
+          maxArea = area;
+          const rect = cv.minAreaRect(cnt);
+          let angle = rect.angle;
+          
+          if (rect.size.width < rect.size.height) {
+            angle = angle + 90;
+          }
+          
+          if (Math.abs(angle) < 45) {
+            bestAngle = angle;
+          }
+        }
+      }
+
+      src.delete();
+      gray.delete();
+      blurred.delete();
+      edges.delete();
+      contours.delete();
+      hierarchy.delete();
+
+      return bestAngle;
+    } catch (err) {
+      console.warn('Rotation estimation failed:', err);
+    }
+    return 0;
+  };
+
+  const handleReDetectPlateAngle = () => {
+    const bgImg = bgImageElementRef.current;
+    if (!bgImg || !activeObject || !activeObject.isNamePlate || !imageMetadata) return;
+
+    // Get current bounding box of activeObject
+    const geom = {
+      x: activeObject.left,
+      y: activeObject.top,
+      width: activeObject.width * activeObject.scaleX,
+      height: activeObject.height * activeObject.scaleY,
+    };
+
+    if (cvLoaded) {
+      const detectedCorners = detectPlateCornersOpenCV(bgImg, geom);
+      if (detectedCorners && detectedCorners.length === 4) {
+        const corners = expandQuadrilateral(detectedCorners, 1.06, 1.10);
+        
+        // Apply perspective warped element
+        const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
+        const ok = safelyApplyWarpedElement(activeObject, flatCanvas, corners);
+        if (ok) {
+          activeObject.corners = corners;
+          activeObject.plateMode = 'perspective';
+          
+          const minX = Math.min(...corners.map(p => p.x));
+          const minY = Math.min(...corners.map(p => p.y));
+          activeObject.set({
+            left: minX,
+            top: minY,
+            scaleX: 1.0,
+            scaleY: 1.0,
+            angle: 0,
+            originX: 'left',
+            originY: 'top',
+          });
+          
+          // Re-bind moving listener if not bound
+          if (!activeObject.hasMovingListener) {
+            activeObject.lastLeft = minX;
+            activeObject.lastTop = minY;
+            activeObject.on('moving', () => {
+              const dx = activeObject.left - activeObject.lastLeft;
+              const dy = activeObject.top - activeObject.lastTop;
+              activeObject.lastLeft = activeObject.left;
+              activeObject.lastTop = activeObject.top;
+              activeObject.corners = activeObject.corners.map((p: Point) => ({
+                x: p.x + dx,
+                y: p.y + dy,
+              }));
+            });
+            activeObject.hasMovingListener = true;
+          } else {
+            activeObject.lastLeft = minX;
+            activeObject.lastTop = minY;
+          }
+
+          activeObject.setCoords();
+          fabricCanvasRef.current?.renderAll();
+          updateGeometryState(activeObject);
+          pushToHistory();
+          alert('Angle successfully re-detected and perspective warp applied.');
+        } else {
+          alert('Could not re-detect corners with high confidence.');
+        }
+      } else {
+        const angle = estimateRotationOpenCV(bgImg, geom);
+        activeObject.set({ angle });
+        activeObject.setCoords();
+        fabricCanvasRef.current?.renderAll();
+        updateGeometryState(activeObject);
+        pushToHistory();
+        alert(`Exact corners not found. Estimated rotation applied: ${Math.round(angle)}°`);
+      }
+    } else {
+      alert('OpenCV.js is still loading or failed to load.');
+    }
+  };
+
   // Sync selection change to settings panel (Section 2: Selection must NOT trigger Perspective conversion!)
   const handleSelectionChange = (target: any) => {
     setActiveObject(target);
+    updateGeometryState(target);
 
     if (target && target.isNamePlate) {
       const options = target.plateOptions;
@@ -1830,70 +2629,30 @@ export default function BrandingEditorClient() {
         const step = e.shiftKey ? 10 : 1;
         let moved = false;
 
-        if (activeObj.isPerspectiveHandle) {
-          const idx = activeObj.cornerIndex;
-          const plate = canvas.getObjects().find((obj: any) => obj.isNamePlate && obj.id === activeObj.plateId) as any;
-          if (plate && plate.corners) {
-            const nextX = activeObj.left + (e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0);
-            const nextY = activeObj.top + (e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0);
+        const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
+        const dy = e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0;
 
-            const proposed = plate.corners.map((p: Point, i: number) =>
-              i === idx ? { x: nextX, y: nextY } : { ...p }
-            );
+        if (dx !== 0 || dy !== 0) {
+          activeObj.set({
+            left: (activeObj.left || 0) + dx,
+            top: (activeObj.top || 0) + dy,
+          });
+          moved = true;
 
-            if (isConvex(proposed)) {
-              activeObj.set({ left: nextX, top: nextY });
-              plate.corners[idx].x = nextX;
-              plate.corners[idx].y = nextY;
-
-              const flatCanvas = renderFlatPlateCanvas(plate.plateOptions, bgImageElementRef.current!.naturalWidth, bgImageElementRef.current!.naturalHeight);
-              safelyApplyWarpedElement(plate, flatCanvas, plate.corners);
-
-              const minX = Math.min(...plate.corners.map((p: any) => p.x));
-              const minY = Math.min(...plate.corners.map((p: any) => p.y));
-              plate.set({ left: minX, top: minY });
-              plate.setCoords();
-              plate.lastLeft = minX;
-              plate.lastTop = minY;
-
-              updateGuideLines(plate.corners);
-              moved = true;
-            }
+          if (activeObj.isNamePlate && activeObj.plateMode === 'perspective') {
+            activeObj.corners = activeObj.corners.map((p: Point) => ({
+              x: p.x + dx,
+              y: p.y + dy,
+            }));
+            activeObj.lastLeft = activeObj.left;
+            activeObj.lastTop = activeObj.top;
           }
-        } else {
-          const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
-          const dy = e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0;
-
-          if (dx !== 0 || dy !== 0) {
-            activeObj.set({
-              left: (activeObj.left || 0) + dx,
-              top: (activeObj.top || 0) + dy,
-            });
-            moved = true;
-
-            if (activeObj.isNamePlate && activeObj.plateMode === 'perspective') {
-              activeObj.corners = activeObj.corners.map((p: Point) => ({
-                x: p.x + dx,
-                y: p.y + dy,
-              }));
-              activeObj.lastLeft = activeObj.left;
-              activeObj.lastTop = activeObj.top;
-
-              if (isAdjustingPerspective) {
-                handlesRef.current.forEach((h: any) => {
-                  const pt = activeObj.corners[h.cornerIndex];
-                  h.set({ left: pt.x, top: pt.y });
-                  h.setCoords();
-                });
-                updateGuideLines(activeObj.corners);
-              }
-            }
-            activeObj.setCoords();
-          }
+          activeObj.setCoords();
         }
 
         if (moved) {
           canvas.renderAll();
+          updateGeometryState(activeObj);
         }
       }
     };
@@ -2072,6 +2831,84 @@ export default function BrandingEditorClient() {
                 />
               </div>
 
+              {/* 17. Detection & Selection Toolbar */}
+              <div className="bg-neutral-900 border border-neutral-850 p-4 rounded-xl flex flex-wrap items-center justify-between gap-3 w-full shadow-lg">
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleDetectNumberPlate}
+                    disabled={isDetecting}
+                    className={`px-4 py-2 text-xs font-bold rounded-lg cursor-pointer transition-all flex items-center gap-1.5 shadow-sm border
+                      ${
+                        isDetecting
+                          ? 'bg-neutral-800 text-neutral-500 border-neutral-750'
+                          : 'bg-red-950 text-red-400 hover:bg-red-900/60 border-red-900'
+                      }`}
+                  >
+                    {isDetecting ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>{detectionStatus || 'Detecting...'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>Detect Number Plate</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={isManualSelecting ? handleCancelManualSelection : handleStartManualSelection}
+                    className={`px-4 py-2 text-xs font-bold rounded-lg cursor-pointer transition-all flex items-center gap-1.5 shadow-sm border
+                      ${
+                        isManualSelecting
+                          ? 'bg-yellow-950 text-yellow-400 hover:bg-yellow-900/65 border-yellow-900 animate-pulse'
+                          : 'bg-neutral-800 hover:bg-neutral-750 text-neutral-300 border-neutral-750'
+                      }`}
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{isManualSelecting ? 'Cancel Manual Selection' : 'Select Plate Area Manually'}</span>
+                  </button>
+                </div>
+
+                {/* Status messages and conditional actions */}
+                <div className="flex items-center gap-2">
+                  {detectedPlates.length > 0 && (
+                    <>
+                      <span className="text-xs text-neutral-400 mr-2">
+                        Detected: <span className="text-green-400 font-bold">{detectedPlates.length} plates</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleBrandAllDetectedPlates}
+                        className="px-3 py-1.5 text-[11px] font-bold bg-neutral-800 hover:bg-neutral-750 text-white rounded-lg border border-neutral-700 cursor-pointer transition-all"
+                      >
+                        Brand All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearDetectionBoxes}
+                        className="px-3 py-1.5 text-[11px] font-bold bg-neutral-800 hover:bg-neutral-750 text-white rounded-lg border border-neutral-700 cursor-pointer transition-all"
+                      >
+                        Clear Boxes
+                      </button>
+                    </>
+                  )}
+                  {isModelMissing && (
+                    <span className="text-xs text-yellow-500 font-medium">
+                      ⚠️ Automatic detection is unavailable. You can select the number plate manually.
+                    </span>
+                  )}
+                  {detectionStatus && !isDetecting && detectedPlates.length === 0 && (
+                    <span className="text-xs text-neutral-500 italic">
+                      Status: {detectionStatus}
+                    </span>
+                  )}
+                </div>
+              </div>
+
               {/* Editor Workspace Container */}
               <div
                 ref={containerRef}
@@ -2166,17 +3003,13 @@ export default function BrandingEditorClient() {
                 <div className="space-y-4">
                   <PlateSettings
                     options={plateOptions}
-                    plateMode={selectedPlateMode}
-                    isAdjustingPerspective={isAdjustingPerspective}
-                    onChangeMode={handlePlateModeChange}
-                    onToggleAdjustPerspective={handleToggleAdjustPerspective}
-                    onApplyAdjust={handleApplyAdjust}
-                    onCancelAdjust={handleCancelAdjust}
-                    onResetToRectangle={handleResetToRectangle}
-                    onCopyPreviousShape={handleCopyPreviousShape}
-                    hasSavedShape={hasSavedShape}
+                    geometry={activeGeometry}
+                    onNudge={handleNudge}
+                    onUpdateGeometry={handleUpdateGeometry}
                     onChange={handlePlateOptionsChange}
                     onApplyPreset={handleApplyPlatePreset}
+                    onReDetectAngle={handleReDetectPlateAngle}
+                    isWarpedPlate={activeObject && activeObject.isNamePlate && activeObject.plateMode === 'perspective'}
                   />
 
                   {activeObject && activeObject.isNamePlate && (

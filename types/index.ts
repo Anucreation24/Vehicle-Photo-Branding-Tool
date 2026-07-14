@@ -69,3 +69,11 @@ export const PLATE_PRESETS: PlatePreset[] = [
     borderColor: '#000000',
   },
 ];
+
+export interface PlateGeometry {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  rotation: number;
+}
