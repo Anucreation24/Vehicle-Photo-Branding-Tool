@@ -432,24 +432,32 @@ export default function BrandingEditorClient() {
 
   // Main Canvas Setup lifecycle
   useEffect(() => {
-    if (!imageUrl || !canvasElRef.current || !containerRef.current) return;
+    if (!imageUrl) return;
+
+    console.log('imageUrl set');
+    console.log('canvas element mounted', !!canvasElRef.current);
+    console.log('container mounted', !!containerRef.current);
 
     setIsInitializingImage(true);
     setInitializationError(null);
 
     const bgImage = new Image();
     let canvasInstance: Canvas | null = null;
+    let observerInstance: ResizeObserver | null = null;
     const currentGeneration = ++initGenerationRef.current;
+    let cancelled = false;
+    let retryFrame = 0;
+    let retryCount = 0;
 
     const timeoutId = setTimeout(() => {
-      if (currentGeneration === initGenerationRef.current) {
+      if (!cancelled && currentGeneration === initGenerationRef.current) {
         handleInitError(new Error('Image preparation timed out (15s). Please try another image.'));
       }
     }, 15000);
 
     const handleInitError = (err: Error) => {
       clearTimeout(timeoutId);
-      if (currentGeneration !== initGenerationRef.current) return;
+      if (cancelled || currentGeneration !== initGenerationRef.current) return;
 
       console.error('Image initialization failed:', err);
       setInitializationError(err.message);
@@ -461,15 +469,13 @@ export default function BrandingEditorClient() {
           fabricCanvasRef.current = null;
         }
       }
-
-      // Revoke and return to uploader
-      clearImageUrl();
     };
 
-    bgImage.src = imageUrl;
-
-    const startDecode = async () => {
+    const runSetup = async () => {
+      console.log('initialization started');
       try {
+        bgImage.src = imageUrl;
+
         if (typeof bgImage.decode === 'function') {
           await bgImage.decode();
         } else {
@@ -479,7 +485,7 @@ export default function BrandingEditorClient() {
           });
         }
 
-        if (currentGeneration !== initGenerationRef.current) {
+        if (cancelled || currentGeneration !== initGenerationRef.current) {
           clearTimeout(timeoutId);
           return;
         }
@@ -564,7 +570,7 @@ export default function BrandingEditorClient() {
             position: 'bottom-left' as WatermarkPosition,
             customLogoUrl: null,
             left: editorWidth * 0.03,
-            top: editorHeight - (editorWidth * 0.18 * (100 / 300)) - (editorWidth * 0.03), // estimate
+            top: editorHeight - (editorWidth * 0.18 * (100 / 300)) - (editorWidth * 0.03),
             scaleX: 1,
             scaleY: 1,
             angle: 0
@@ -572,9 +578,12 @@ export default function BrandingEditorClient() {
         };
         setUndoStack([initialSnap]);
 
-        // Rendering editor is complete! End required loading state (Item 7)
-        setIsInitializingImage(false);
         clearTimeout(timeoutId);
+
+        if (!cancelled && currentGeneration === initGenerationRef.current) {
+          setIsInitializingImage(false);
+          console.log('initialization completed');
+        }
 
         // Load watermark separately (Item 7)
         addDefaultWatermark(canvasInstance, editorWidth, editorHeight);
@@ -585,39 +594,61 @@ export default function BrandingEditorClient() {
         }
         currentUrlRef.current = imageUrl;
 
+        // Initialize ResizeObserver only after container is confirmed to be mounted
+        observerInstance = new ResizeObserver((entries) => {
+          if (entries.length === 0 || !fabricCanvasRef.current) return;
+          const fCanvas = fabricCanvasRef.current;
+
+          const cWidth = entries[0].contentRect.width || 800;
+          const cHeight = Math.min(500, window.innerHeight * 0.5);
+
+          const scale = fitCanvasToEditor(
+            fCanvas,
+            fCanvas.width,
+            fCanvas.height,
+            cWidth,
+            cHeight,
+            editorZoom
+          );
+          setDisplayScale(scale);
+        });
+
+        if (containerRef.current) {
+          observerInstance.observe(containerRef.current);
+        }
+
       } catch (err: any) {
         handleInitError(err);
       }
     };
 
-    startDecode();
+    const checkMountAndStart = () => {
+      if (cancelled) return;
 
-    const observer = new ResizeObserver((entries) => {
-      if (entries.length === 0 || !fabricCanvasRef.current) return;
-      const fCanvas = fabricCanvasRef.current;
+      if (!canvasElRef.current || !containerRef.current) {
+        if (retryCount < 50) {
+          retryCount++;
+          retryFrame = requestAnimationFrame(checkMountAndStart);
+        } else {
+          handleInitError(new Error('Canvas mounting failed. Please try reloading the page.'));
+        }
+        return;
+      }
 
-      const containerWidth = entries[0].contentRect.width || 800;
-      const containerHeight = Math.min(500, window.innerHeight * 0.5);
+      runSetup();
+    };
 
-      const scale = fitCanvasToEditor(
-        fCanvas,
-        fCanvas.width,
-        fCanvas.height,
-        containerWidth,
-        containerHeight,
-        editorZoom
-      );
-      setDisplayScale(scale);
-    });
-
-    observer.observe(containerRef.current);
+    retryFrame = requestAnimationFrame(checkMountAndStart);
 
     return () => {
-      observer.disconnect();
+      cancelled = true;
+      cancelAnimationFrame(retryFrame);
+      if (observerInstance) {
+        observerInstance.disconnect();
+      }
       clearTimeout(timeoutId);
 
       // Prevent React Strict-Mode double initialization (Item 10)
-      // Only dispose the canvas created by this execution
       if (canvasInstance) {
         canvasInstance.dispose();
         if (fabricCanvasRef.current === canvasInstance) {
@@ -984,63 +1015,75 @@ export default function BrandingEditorClient() {
               </div>
             </div>
           ) : (
-            <div className="flex-1 flex flex-col space-y-4 min-h-0 relative">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <ImageUploader
-                  onImageLoaded={handleImageLoadedWrapped}
-                  onImageCleared={clearImageUrl}
-                  currentImageName={imageMetadata?.name}
-                  currentImageMetadata={imageMetadata}
+            <div className="relative flex-1 flex flex-col space-y-4 min-h-0">
+              {!isInitializingImage && !initializationError && (
+                <DetectionPanel
+                  isDetecting={isDetecting}
+                  detectionStatus={detectionStatus}
+                  isManualSelecting={isManualSelecting}
+                  detectedPlates={detectedPlates}
+                  isModelMissing={isModelMissing}
+                  onDetect={handleDetectNumberPlate}
+                  onToggleManualSelection={isManualSelecting ? handleCancelManualSelection : handleStartManualSelection}
+                  onBrandAll={handleBrandAllDetectedPlates}
+                  onClearBoxes={clearDetectionBoxes}
                 />
-                <BeforeAfterToggle
+              )}
+
+              <div className="relative flex-1 min-h-[350px]">
+                <EditorCanvas
+                  containerRef={containerRef}
+                  canvasElRef={canvasElRef}
                   isPreviewActive={isPreviewActive}
-                  onToggle={handleTogglePreview}
                 />
+
+                {isInitializingImage && (
+                  <div className="absolute inset-0 z-30 flex flex-col items-center justify-center rounded-2xl bg-neutral-950/85 backdrop-blur-sm pointer-events-auto">
+                    <RefreshCw className="w-8 h-8 text-yellow-500 animate-spin mb-3" />
+                    <p className="text-sm font-medium text-neutral-300 font-mono">
+                      Preparing editor...
+                    </p>
+                    <p className="mt-1 text-xs text-neutral-500">
+                      Optimizing your photo for editing
+                    </p>
+                  </div>
+                )}
+
+                {initializationError && (
+                  <div className="absolute inset-0 z-30 flex flex-col items-center justify-center rounded-2xl bg-neutral-950/90 backdrop-blur-sm p-6 text-center pointer-events-auto">
+                    <div className="w-12 h-12 rounded-full bg-red-950/50 border border-red-900 flex items-center justify-center text-red-500 text-xl font-bold mb-3">
+                      ⚠️
+                    </div>
+                    <h3 className="text-sm font-bold text-red-400 mb-1">Editor Preparation Failed</h3>
+                    <p className="text-xs text-neutral-400 max-w-sm mb-4 leading-relaxed">
+                      {initializationError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={clearImageUrl}
+                      className="px-4 py-2 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs font-bold text-white rounded-lg transition-colors cursor-pointer"
+                    >
+                      Try Another Image
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {isInitializingImage ? (
-                <div className="flex-1 flex flex-col items-center justify-center border border-neutral-900 rounded-xl bg-neutral-900/20 shadow-inner min-h-[300px]">
-                  <RefreshCw className="w-8 h-8 text-yellow-500 animate-spin mb-3" />
-                  <p className="text-sm font-medium text-neutral-300 font-mono">Preparing editor...</p>
-                </div>
-              ) : (
-                <>
-                  {/* Auto / Manual Detection toolbar */}
-                  <DetectionPanel
-                    isDetecting={isDetecting}
-                    detectionStatus={detectionStatus}
-                    isManualSelecting={isManualSelecting}
-                    detectedPlates={detectedPlates}
-                    isModelMissing={isModelMissing}
-                    onDetect={handleDetectNumberPlate}
-                    onToggleManualSelection={isManualSelecting ? handleCancelManualSelection : handleStartManualSelection}
-                    onBrandAll={handleBrandAllDetectedPlates}
-                    onClearBoxes={clearDetectionBoxes}
-                  />
-
-                  {/* Editor Workspace Canvas */}
-                  <EditorCanvas
-                    containerRef={containerRef}
-                    canvasElRef={canvasElRef}
-                    isPreviewActive={isPreviewActive}
-                  />
-
-                  {/* Editor Toolbar */}
-                  <EditorToolbar
-                    canUndo={undoStack.length > 1}
-                    canRedo={redoStack.length > 0}
-                    onUndo={handleUndo}
-                    onRedo={handleRedo}
-                    onZoomIn={() => handleZoom('in', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
-                    onZoomOut={() => handleZoom('out', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
-                    onZoomFit={() => handleZoom('fit', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
-                    onDeleteSelected={() => handleDeleteSelectedPlate(() => handleWatermarkOptionsChange({ visible: false }))}
-                    onReset={() => setIsConfirmResetOpen(true)}
-                    onAddPlate={handleAddPlate}
-                    hasSelection={activeObject !== null}
-                    zoomLevel={editorZoom}
-                  />
-                </>
+              {!isInitializingImage && !initializationError && (
+                <EditorToolbar
+                  canUndo={undoStack.length > 1}
+                  canRedo={redoStack.length > 0}
+                  onUndo={handleUndo}
+                  onRedo={handleRedo}
+                  onZoomIn={() => handleZoom('in', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
+                  onZoomOut={() => handleZoom('out', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
+                  onZoomFit={() => handleZoom('fit', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
+                  onDeleteSelected={() => handleDeleteSelectedPlate(() => handleWatermarkOptionsChange({ visible: false }))}
+                  onReset={() => setIsConfirmResetOpen(true)}
+                  onAddPlate={handleAddPlate}
+                  hasSelection={activeObject !== null}
+                  zoomLevel={editorZoom}
+                />
               )}
             </div>
           )}
