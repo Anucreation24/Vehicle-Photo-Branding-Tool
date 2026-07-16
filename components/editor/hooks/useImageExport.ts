@@ -28,30 +28,6 @@ export function useImageExport({
   const [exportCount, setExportCount] = useState<number>(1);
   const [isExporting, setIsExporting] = useState<boolean>(false);
 
-  const exportOriginalImage = (): string | null => {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas || !imageMetadata) return null;
-
-    const active = canvas.getActiveObject();
-    canvas.discardActiveObject();
-    canvas.renderAll();
-
-    // Since Fabric canvas coordinates are 1:1 original image, toDataURL with multiplier 1.0
-    // will export at the original resolution of the image.
-    const dataUrl = canvas.toDataURL({
-      format: exportFormat === 'jpeg' ? 'jpeg' : 'png',
-      quality: exportFormat === 'jpeg' ? exportQuality : undefined,
-      multiplier: 1.0,
-    });
-
-    if (active) {
-      canvas.setActiveObject(active);
-    }
-    canvas.renderAll();
-
-    return dataUrl;
-  };
-
   const handleExportImage = async () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !bgImageElementRef.current || !imageMetadata) return;
@@ -59,25 +35,19 @@ export function useImageExport({
     setIsExporting(true);
 
     try {
-      let dataUrl: string | null = null;
+      canvas.discardActiveObject();
+      canvas.renderAll();
 
-      if (exportPreset === 'original') {
-        dataUrl = exportOriginalImage();
-      } else {
-        canvas.discardActiveObject();
-        canvas.renderAll();
-
-        dataUrl = await generateExportDataUrl(canvas, bgImageElementRef.current, {
-          preset: exportPreset,
-          format: exportFormat,
-          quality: exportQuality,
-          fitMethod: exportFitMethod,
-          backgroundColor: exportBgColor,
-          watermarkOptions,
-          isWatermarkManual,
-          imageMetadata,
-        });
-      }
+      const dataUrl = await generateExportDataUrl(canvas, bgImageElementRef.current, {
+        preset: exportPreset,
+        format: exportFormat,
+        quality: exportQuality,
+        fitMethod: exportFitMethod,
+        backgroundColor: exportBgColor,
+        watermarkOptions,
+        isWatermarkManual,
+        imageMetadata,
+      });
 
       if (dataUrl) {
         const link = document.createElement('a');

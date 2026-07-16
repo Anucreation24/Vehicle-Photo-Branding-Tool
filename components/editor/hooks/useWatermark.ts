@@ -42,8 +42,8 @@ export function useWatermark({
 
   const addDefaultWatermark = async (
     canvas: Canvas,
-    originalWidth: number,
-    originalHeight: number,
+    editorWidth: number,
+    editorHeight: number,
     customUrl?: string
   ) => {
     setLogoError(null);
@@ -56,14 +56,15 @@ export function useWatermark({
         canvas.remove(watermarkFabricObjectRef.current);
       }
 
-      const targetLogoWidth = originalWidth * watermarkOptions.scale;
+      // Sized from editorWidth (Item 5)
+      const targetLogoWidth = editorWidth * watermarkOptions.scale;
       const logoScale = targetLogoWidth / logoImg.naturalWidth;
 
       const wm = new FabricImage(logoImg, {
         scaleX: logoScale,
         scaleY: logoScale,
-        left: originalWidth * 0.03,
-        top: originalHeight - (logoImg.naturalHeight * logoScale) - (originalWidth * 0.03),
+        left: editorWidth * 0.03, // 3% margin
+        top: editorHeight - (logoImg.naturalHeight * logoScale) - (editorWidth * 0.03),
         opacity: watermarkOptions.opacity,
         visible: watermarkOptions.visible && !isPreviewActive,
         selectable: true,
@@ -98,6 +99,9 @@ export function useWatermark({
     const wm = watermarkFabricObjectRef.current;
     if (!canvas || !wm || !imageMetadata) return;
 
+    const editorW = imageMetadata.editorWidth || imageMetadata.width;
+    const editorH = imageMetadata.editorHeight || imageMetadata.height;
+
     setWatermarkOptions((prev) => {
       const next = { ...prev, ...updated };
 
@@ -106,8 +110,8 @@ export function useWatermark({
         const { left, top, scale } = getWatermarkCoords(
           wm.width,
           wm.height,
-          imageMetadata.width,
-          imageMetadata.height,
+          editorW,
+          editorH,
           next
         );
         wm.set({ left, top, scaleX: scale, scaleY: scale });
@@ -118,8 +122,8 @@ export function useWatermark({
         const { left, top, scale } = getWatermarkCoords(
           wm.width,
           wm.height,
-          imageMetadata.width,
-          imageMetadata.height,
+          editorW,
+          editorH,
           next
         );
         wm.set({ left, top, scaleX: scale, scaleY: scale });
@@ -142,13 +146,16 @@ export function useWatermark({
     const canvas = fabricCanvasRef.current;
     if (!canvas || !imageMetadata) return;
 
+    const editorW = imageMetadata.editorWidth || imageMetadata.width;
+    const editorH = imageMetadata.editorHeight || imageMetadata.height;
+
     setWatermarkOptions((prev) => ({
       ...prev,
       customLogoUrl: url,
       visible: true,
     }));
 
-    addDefaultWatermark(canvas, imageMetadata.width, imageMetadata.height, url).then(() => {
+    addDefaultWatermark(canvas, editorW, editorH, url).then(() => {
       pushToHistory();
     });
   };
@@ -156,6 +163,9 @@ export function useWatermark({
   const handleClearCustomLogo = () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !imageMetadata) return;
+
+    const editorW = imageMetadata.editorWidth || imageMetadata.width;
+    const editorH = imageMetadata.editorHeight || imageMetadata.height;
 
     if (watermarkOptions.customLogoUrl) {
       URL.revokeObjectURL(watermarkOptions.customLogoUrl);
@@ -166,7 +176,7 @@ export function useWatermark({
       customLogoUrl: null,
     }));
 
-    addDefaultWatermark(canvas, imageMetadata.width, imageMetadata.height, '/branding/thennakoon-tours-logo.png').then(() => {
+    addDefaultWatermark(canvas, editorW, editorH, '/branding/thennakoon-tours-logo.png').then(() => {
       pushToHistory();
     });
   };

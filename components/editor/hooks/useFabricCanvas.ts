@@ -15,17 +15,18 @@ export function useFabricCanvas({ canvasElRef }: UseFabricCanvasProps) {
   const [displayScale, setDisplayScale] = useState<number>(1.0);
   const [editorZoom, setEditorZoom] = useState<number>(1.0);
 
-  const initializeImageCanvas = (bgImage: HTMLImageElement): Canvas => {
-    const originalWidth = bgImage.naturalWidth;
-    const originalHeight = bgImage.naturalHeight;
-
+  const initializeImageCanvas = (
+    bgImage: HTMLImageElement,
+    editorWidth: number,
+    editorHeight: number
+  ): Canvas => {
     if (fabricCanvasRef.current) {
       fabricCanvasRef.current.dispose();
     }
 
     const canvas = new Canvas(canvasElRef.current!, {
-      width: originalWidth,
-      height: originalHeight,
+      width: editorWidth,
+      height: editorHeight,
       enableRetinaScaling: false,
       selectionColor: 'rgba(128, 0, 0, 0.15)',
       selectionBorderColor: '#8B0000',
@@ -35,14 +36,17 @@ export function useFabricCanvas({ canvasElRef }: UseFabricCanvasProps) {
     fabricCanvasRef.current = canvas;
     bgImageElementRef.current = bgImage;
 
-    // Load background image at 1:1 scale
+    // Scale background image to exactly fill working canvas (Item 2)
+    const scaleX = editorWidth / bgImage.naturalWidth;
+    const scaleY = editorHeight / bgImage.naturalHeight;
+
     const fabricBg = new FabricImage(bgImage, {
       left: 0,
       top: 0,
       originX: 'left',
       originY: 'top',
-      scaleX: 1,
-      scaleY: 1,
+      scaleX,
+      scaleY,
       selectable: false,
       evented: false,
       lockMovementX: true,
@@ -54,10 +58,6 @@ export function useFabricCanvas({ canvasElRef }: UseFabricCanvasProps) {
       hasBorders: false,
       angle: 0,
     });
-
-    const imageScaleX = originalWidth / fabricBg.width;
-    const imageScaleY = originalHeight / fabricBg.height;
-    fabricBg.set({ scaleX: imageScaleX, scaleY: imageScaleY });
 
     bgFabricObjectRef.current = fabricBg;
     canvas.add(fabricBg);
@@ -132,8 +132,8 @@ export function useFabricCanvas({ canvasElRef }: UseFabricCanvasProps) {
     setEditorZoom(nextZoom);
     const scale = fitCanvasToEditor(
       canvas,
-      bgImg.naturalWidth,
-      bgImg.naturalHeight,
+      canvas.width,
+      canvas.height,
       containerWidth,
       containerHeight,
       nextZoom

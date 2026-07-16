@@ -181,6 +181,7 @@ export async function generateExportDataUrl(
 
   // 4. Replicate and scale branding overlays
   const canvasObjects = displayCanvas.getObjects();
+  const toOriginal = 1 / (imageMetadata.editorScale || 1.0);
 
   for (const obj of canvasObjects) {
     const customObj = obj as any;
@@ -190,8 +191,8 @@ export async function generateExportDataUrl(
       const newPlate = createNamePlate(plateOptions, originalWidth, originalHeight);
       
       newPlate.set({
-        left: obj.left * scale + leftOffset,
-        top: obj.top * scale + topOffset,
+        left: obj.left * toOriginal * scale + leftOffset,
+        top: obj.top * toOriginal * scale + topOffset,
         scaleX: obj.scaleX * scale,
         scaleY: obj.scaleY * scale,
         angle: obj.angle,
@@ -213,10 +214,10 @@ export async function generateExportDataUrl(
       if (isWatermarkManual) {
         // Translate manual watermark drag coords
         newWatermark.set({
-          left: obj.left * scale + leftOffset,
-          top: obj.top * scale + topOffset,
-          scaleX: obj.scaleX * scale,
-          scaleY: obj.scaleY * scale,
+          left: obj.left * toOriginal * scale + leftOffset,
+          top: obj.top * toOriginal * scale + topOffset,
+          scaleX: obj.scaleX * toOriginal * scale,
+          scaleY: obj.scaleY * toOriginal * scale,
           angle: obj.angle,
         });
       } else {

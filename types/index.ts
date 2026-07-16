@@ -40,6 +40,11 @@ export interface ImageMetadata {
   width: number;
   height: number;
   size: number; // in bytes
+  editorWidth?: number;
+  editorHeight?: number;
+  editorScale?: number;
+  toOriginalX?: number;
+  toOriginalY?: number;
 }
 
 export interface PlatePreset {

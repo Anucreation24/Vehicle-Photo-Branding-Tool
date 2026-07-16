@@ -76,7 +76,9 @@ export function usePlateObjects({
     if (!canvas || !imageMetadata) return;
 
     const id = 'plate_' + Math.random().toString(36).substring(2, 11);
-    const flatCanvas = renderFlatPlateCanvas(plateOptions, imageMetadata.width, imageMetadata.height);
+    const editorW = imageMetadata.editorWidth || imageMetadata.width;
+    const editorH = imageMetadata.editorHeight || imageMetadata.height;
+    const flatCanvas = renderFlatPlateCanvas(plateOptions, editorW, editorH);
 
     const plate = new FabricImage(flatCanvas, {
       left: cx,
@@ -125,13 +127,16 @@ export function usePlateObjects({
 
     if (isPreviewActive) handleTogglePreview(false);
 
+    const editorW = imageMetadata.editorWidth || imageMetadata.width;
+    const editorH = imageMetadata.editorHeight || imageMetadata.height;
+
     // Standard default dimensions (around 30% width, scaled)
-    const baseW = Math.max(200, Math.round(imageMetadata.width * 0.3));
+    const baseW = Math.max(200, Math.round(editorW * 0.3));
     const baseH = Math.max(60, Math.round(baseW * 0.28));
 
     createBrandedPlateAt(
-      imageMetadata.width / 2,
-      imageMetadata.height / 2,
+      editorW / 2,
+      editorH / 2,
       baseW,
       baseH,
       plateOptions.rotation
@@ -148,7 +153,9 @@ export function usePlateObjects({
       if (activeObject && activeObject.isNamePlate) {
         activeObject.plateOptions = { ...activeObject.plateObject?.plateOptions, ...updated };
 
-        const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, imageMetadata.width, imageMetadata.height);
+        const editorW = imageMetadata.editorWidth || imageMetadata.width;
+        const editorH = imageMetadata.editorHeight || imageMetadata.height;
+        const flatCanvas = renderFlatPlateCanvas(activeObject.plateOptions, editorW, editorH);
         
         // Retain current visual scaling when updating text or colors
         const currentScaleX = activeObject.scaleX;
@@ -190,7 +197,10 @@ export function usePlateObjects({
 
     const id = 'plate_' + Math.random().toString(36).substring(2, 11);
     const options = { ...activeObject.plateOptions };
-    const flatCanvas = renderFlatPlateCanvas(options, imageMetadata.width, imageMetadata.height);
+
+    const editorW = imageMetadata.editorWidth || imageMetadata.width;
+    const editorH = imageMetadata.editorHeight || imageMetadata.height;
+    const flatCanvas = renderFlatPlateCanvas(options, editorW, editorH);
 
     const clone = new FabricImage(flatCanvas, {
       left: activeObject.left + 40,

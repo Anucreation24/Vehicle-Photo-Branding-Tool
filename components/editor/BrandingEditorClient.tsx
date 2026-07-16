@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Rect, FabricText, FabricImage } from 'fabric';
+import { Rect, FabricText, FabricImage, Canvas } from 'fabric';
 import {
   ImageMetadata,
   PlateOptions,
@@ -33,7 +33,7 @@ import WatermarkSettings from '../WatermarkSettings';
 import ExportPanel from '../ExportPanel';
 import BeforeAfterToggle from '../BeforeAfterToggle';
 import ConfirmDialog from '../ConfirmDialog';
-import { Palette, Image as ImageIcon, Download, ShieldCheck } from 'lucide-react';
+import { Palette, Image as ImageIcon, Download, ShieldCheck, RefreshCw } from 'lucide-react';
 
 import { useImageUpload } from './hooks/useImageUpload';
 import { useFabricCanvas } from './hooks/useFabricCanvas';
@@ -78,6 +78,18 @@ export default function BrandingEditorClient() {
 
   // 1. Core Upload Logic Hook
   const { imageUrl, imageMetadata, handleImageLoaded, clearImage } = useImageUpload();
+
+  // Async Initialization and strict mode tracking (Items 7, 9, 10)
+  const [isInitializingImage, setIsInitializingImage] = useState<boolean>(false);
+  const [initializationError, setInitializationError] = useState<string | null>(null);
+  const initGenerationRef = useRef<number>(0);
+  const currentUrlRef = useRef<string | null>(null);
+
+  const handleImageLoadedWrapped = (url: string, metadata: ImageMetadata) => {
+    setIsInitializingImage(true);
+    setInitializationError(null);
+    handleImageLoaded(url, metadata);
+  };
 
   // 2. Fabric Canvas Lifecycle Hook
   const {
@@ -409,87 +421,188 @@ export default function BrandingEditorClient() {
     }
   };
 
+  // Unmount cleanup for the active Object URL (Item 9)
+  useEffect(() => {
+    return () => {
+      if (currentUrlRef.current) {
+        URL.revokeObjectURL(currentUrlRef.current);
+      }
+    };
+  }, []);
+
   // Main Canvas Setup lifecycle
   useEffect(() => {
     if (!imageUrl || !canvasElRef.current || !containerRef.current) return;
 
+    setIsInitializingImage(true);
+    setInitializationError(null);
+
     const bgImage = new Image();
+    let canvasInstance: Canvas | null = null;
+    const currentGeneration = ++initGenerationRef.current;
 
-    bgImage.onload = async () => {
-      bgImageElementRef.current = bgImage;
-      const originalWidth = bgImage.naturalWidth;
-      const originalHeight = bgImage.naturalHeight;
+    const timeoutId = setTimeout(() => {
+      if (currentGeneration === initGenerationRef.current) {
+        handleInitError(new Error('Image preparation timed out (15s). Please try another image.'));
+      }
+    }, 15000);
 
-      // 1. Initialize Canvas
-      const canvas = initializeImageCanvas(bgImage);
+    const handleInitError = (err: Error) => {
+      clearTimeout(timeoutId);
+      if (currentGeneration !== initGenerationRef.current) return;
 
-      // 2. Fit display scaling via CSS
-      const containerWidth = containerRef.current?.clientWidth || 800;
-      const containerHeight = Math.min(500, window.innerHeight * 0.5);
+      console.error('Image initialization failed:', err);
+      setInitializationError(err.message);
+      setIsInitializingImage(false);
 
-      const fitScale = fitCanvasToEditor(
-        canvas,
-        originalWidth,
-        originalHeight,
-        containerWidth,
-        containerHeight,
-        editorZoom
-      );
-      setDisplayScale(fitScale);
-
-      // 3. Load Watermark
-      await addDefaultWatermark(canvas, originalWidth, originalHeight);
-
-      // 4. Register Event Listeners
-      canvas.on('selection:created', (e) => {
-        const target = e.selected ? e.selected[0] : null;
-        handleSelectionChange(target);
-      });
-      canvas.on('selection:updated', (e) => {
-        const target = e.selected ? e.selected[0] : null;
-        handleSelectionChange(target);
-      });
-      canvas.on('selection:cleared', () => {
-        handleSelectionChange(null);
-      });
-
-      canvas.on('object:moving', () => updateGeometryState(canvas.getActiveObject()));
-      canvas.on('object:scaling', () => updateGeometryState(canvas.getActiveObject()));
-      canvas.on('object:rotating', () => updateGeometryState(canvas.getActiveObject()));
-      
-      canvas.on('object:modified', () => {
-        updateGeometryState(canvas.getActiveObject());
-        pushToHistory();
-      });
-
-      // Mouse events for Manual Rectangle Selection
-      canvas.on('mouse:down', (opt) => handleCanvasMouseDown(opt));
-      canvas.on('mouse:move', (opt) => handleCanvasMouseMove(opt));
-      canvas.on('mouse:up', () => handleCanvasMouseUp());
-
-      // Save initial state
-      const initialSnap = captureCanvasStateSnapshot();
-      if (initialSnap) {
-        setUndoStack([initialSnap]);
+      if (canvasInstance) {
+        canvasInstance.dispose();
+        if (fabricCanvasRef.current === canvasInstance) {
+          fabricCanvasRef.current = null;
+        }
       }
 
-      canvas.renderAll();
+      // Revoke and return to uploader
+      clearImageUrl();
     };
 
     bgImage.src = imageUrl;
 
+    const startDecode = async () => {
+      try {
+        if (typeof bgImage.decode === 'function') {
+          await bgImage.decode();
+        } else {
+          await new Promise<void>((resolve, reject) => {
+            bgImage.onload = () => resolve();
+            bgImage.onerror = () => reject(new Error('Failed to load image.'));
+          });
+        }
+
+        if (currentGeneration !== initGenerationRef.current) {
+          clearTimeout(timeoutId);
+          return;
+        }
+
+        const originalWidth = bgImage.naturalWidth;
+        const originalHeight = bgImage.naturalHeight;
+
+        if (originalWidth <= 0 || originalHeight <= 0) {
+          throw new Error('Invalid image dimensions (0x0).');
+        }
+
+        // Capping dimensions (Item 1)
+        const MAX_EDITOR_SIDE = 1600;
+        const editorScale = Math.min(1, MAX_EDITOR_SIDE / Math.max(originalWidth, originalHeight));
+        const editorWidth = Math.max(1, Math.round(originalWidth * editorScale));
+        const editorHeight = Math.max(1, Math.round(originalHeight * editorScale));
+
+        // Update metadata (Item 3)
+        handleImageLoaded(imageUrl, {
+          name: imageMetadata?.name || 'Uploaded Photo',
+          size: imageMetadata?.size || 0,
+          width: originalWidth,
+          height: originalHeight,
+          editorWidth,
+          editorHeight,
+          editorScale,
+          toOriginalX: originalWidth / editorWidth,
+          toOriginalY: originalHeight / editorHeight,
+        });
+
+        // Initialize Canvas
+        canvasInstance = initializeImageCanvas(bgImage, editorWidth, editorHeight);
+
+        // Fit display scaling via CSS
+        const containerWidth = containerRef.current?.clientWidth || 800;
+        const containerHeight = Math.min(500, window.innerHeight * 0.5);
+
+        const fitScale = fitCanvasToEditor(
+          canvasInstance,
+          editorWidth,
+          editorHeight,
+          containerWidth,
+          containerHeight,
+          editorZoom
+        );
+        setDisplayScale(fitScale);
+
+        // Register Event Listeners
+        canvasInstance.on('selection:created', (e) => {
+          const target = e.selected ? e.selected[0] : null;
+          handleSelectionChange(target);
+        });
+        canvasInstance.on('selection:updated', (e) => {
+          const target = e.selected ? e.selected[0] : null;
+          handleSelectionChange(target);
+        });
+        canvasInstance.on('selection:cleared', () => {
+          handleSelectionChange(null);
+        });
+
+        canvasInstance.on('object:moving', () => updateGeometryState(canvasInstance!.getActiveObject()));
+        canvasInstance.on('object:scaling', () => updateGeometryState(canvasInstance!.getActiveObject()));
+        canvasInstance.on('object:rotating', () => updateGeometryState(canvasInstance!.getActiveObject()));
+        
+        canvasInstance.on('object:modified', () => {
+          updateGeometryState(canvasInstance!.getActiveObject());
+          pushToHistory();
+        });
+
+        // Mouse events for Manual Rectangle Selection
+        canvasInstance.on('mouse:down', (opt) => handleCanvasMouseDown(opt));
+        canvasInstance.on('mouse:move', (opt) => handleCanvasMouseMove(opt));
+        canvasInstance.on('mouse:up', () => handleCanvasMouseUp());
+
+        // Initialize with default watermark & default state
+        const initialSnap = {
+          plates: [],
+          watermark: {
+            visible: true,
+            opacity: 1.0,
+            scale: 0.18,
+            position: 'bottom-left' as WatermarkPosition,
+            customLogoUrl: null,
+            left: editorWidth * 0.03,
+            top: editorHeight - (editorWidth * 0.18 * (100 / 300)) - (editorWidth * 0.03), // estimate
+            scaleX: 1,
+            scaleY: 1,
+            angle: 0
+          }
+        };
+        setUndoStack([initialSnap]);
+
+        // Rendering editor is complete! End required loading state (Item 7)
+        setIsInitializingImage(false);
+        clearTimeout(timeoutId);
+
+        // Load watermark separately (Item 7)
+        addDefaultWatermark(canvasInstance, editorWidth, editorHeight);
+
+        // Avoid Object-URL Races (Item 9): revoke old URL now that new editor is ready
+        if (currentUrlRef.current && currentUrlRef.current !== imageUrl) {
+          URL.revokeObjectURL(currentUrlRef.current);
+        }
+        currentUrlRef.current = imageUrl;
+
+      } catch (err: any) {
+        handleInitError(err);
+      }
+    };
+
+    startDecode();
+
     const observer = new ResizeObserver((entries) => {
-      if (entries.length === 0 || !fabricCanvasRef.current || !bgImageElementRef.current) return;
+      if (entries.length === 0 || !fabricCanvasRef.current) return;
       const fCanvas = fabricCanvasRef.current;
-      const bgImg = bgImageElementRef.current;
 
       const containerWidth = entries[0].contentRect.width || 800;
       const containerHeight = Math.min(500, window.innerHeight * 0.5);
 
       const scale = fitCanvasToEditor(
         fCanvas,
-        bgImg.naturalWidth,
-        bgImg.naturalHeight,
+        fCanvas.width,
+        fCanvas.height,
         containerWidth,
         containerHeight,
         editorZoom
@@ -501,10 +614,16 @@ export default function BrandingEditorClient() {
 
     return () => {
       observer.disconnect();
-      if (fabricCanvasRef.current) {
-        fabricCanvasRef.current.dispose();
+      clearTimeout(timeoutId);
+
+      // Prevent React Strict-Mode double initialization (Item 10)
+      // Only dispose the canvas created by this execution
+      if (canvasInstance) {
+        canvasInstance.dispose();
+        if (fabricCanvasRef.current === canvasInstance) {
+          fabricCanvasRef.current = null;
+        }
       }
-      fabricCanvasRef.current = null;
     };
   }, [imageUrl]);
 
@@ -664,17 +783,18 @@ export default function BrandingEditorClient() {
 
   const applyBrandingToDetection = (det: DetectionResult) => {
     const bgImg = bgImageElementRef.current;
-    if (!bgImg) return;
+    if (!bgImg || !imageMetadata) return;
 
     let angle = 0;
     if (cvLoaded) {
       angle = estimateRotationOpenCV(bgImg, det);
     }
 
-    const cx = det.x + det.width / 2;
-    const cy = det.y + det.height / 2;
-    const w = det.width * 1.06;
-    const h = det.height * 1.10;
+    const editorScale = imageMetadata.editorScale || 1.0;
+    const cx = (det.x + det.width / 2) * editorScale;
+    const cy = (det.y + det.height / 2) * editorScale;
+    const w = det.width * 1.06 * editorScale;
+    const h = det.height * 1.10 * editorScale;
 
     createBrandedPlateAt(cx, cy, w, h, angle);
   };
@@ -696,18 +816,20 @@ export default function BrandingEditorClient() {
 
   const drawDetectionBoxes = (detections: DetectionResult[]) => {
     const canvas = fabricCanvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !imageMetadata) return;
 
     clearDetectionBoxes();
+
+    const editorScale = imageMetadata.editorScale || 1.0;
 
     detections.forEach((det) => {
       const isBest = det.confidence === Math.max(...detections.map((d) => d.confidence));
       
       const rect = new Rect({
-        left: det.x,
-        top: det.y,
-        width: det.width,
-        height: det.height,
+        left: det.x * editorScale,
+        top: det.y * editorScale,
+        width: det.width * editorScale,
+        height: det.height * editorScale,
         fill: 'rgba(0, 255, 0, 0.05)',
         stroke: isBest ? '#22C55E' : '#EAB308',
         strokeWidth: Math.max(3, 3 / displayScale),
@@ -718,8 +840,8 @@ export default function BrandingEditorClient() {
       });
 
       const textObj = new FabricText(`Plate (${Math.round(det.confidence * 100)}%)`, {
-        left: det.x,
-        top: Math.max(0, det.y - Math.max(24, 24 / displayScale)),
+        left: det.x * editorScale,
+        top: Math.max(0, det.y * editorScale - Math.max(24, 24 / displayScale)),
         fontSize: Math.max(16, 16 / displayScale),
         fill: isBest ? '#22C55E' : '#EAB308',
         fontFamily: 'sans-serif',
@@ -822,10 +944,23 @@ export default function BrandingEditorClient() {
             <div className="flex-1 flex items-center justify-center">
               <div className="w-full max-w-2xl bg-neutral-900/20 border border-neutral-900 rounded-2xl p-6 shadow-2xl">
                 <h2 className="text-xl font-bold mb-4 text-center">Branding Tool Workflow</h2>
-                <ImageUploader
-                  onImageLoaded={handleImageLoaded}
-                  onImageCleared={clearImageUrl}
-                />
+                {initializationError && (
+                  <div className="mb-4 bg-red-950/40 border border-red-900 text-red-300 px-4 py-2.5 rounded-lg text-xs leading-relaxed flex items-start gap-2">
+                    <span className="font-bold text-red-500 mt-0.5">Error:</span>
+                    <div className="flex-1">{initializationError}</div>
+                  </div>
+                )}
+                {isInitializingImage ? (
+                  <div className="flex flex-col items-center justify-center p-12 border-2 border-dashed border-neutral-850 rounded-xl bg-neutral-900/50">
+                    <RefreshCw className="w-8 h-8 text-yellow-500 animate-spin mb-3" />
+                    <p className="text-sm font-medium text-neutral-300 font-mono">Preparing editor...</p>
+                  </div>
+                ) : (
+                  <ImageUploader
+                    onImageLoaded={handleImageLoadedWrapped}
+                    onImageCleared={clearImageUrl}
+                  />
+                )}
                 <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm text-neutral-400">
                   <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-850">
                     <h3 className="font-bold text-white flex items-center gap-2 mb-1.5">
@@ -849,10 +984,10 @@ export default function BrandingEditorClient() {
               </div>
             </div>
           ) : (
-            <div className="flex-1 flex flex-col space-y-4 min-h-0">
+            <div className="flex-1 flex flex-col space-y-4 min-h-0 relative">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <ImageUploader
-                  onImageLoaded={handleImageLoaded}
+                  onImageLoaded={handleImageLoadedWrapped}
                   onImageCleared={clearImageUrl}
                   currentImageName={imageMetadata?.name}
                   currentImageMetadata={imageMetadata}
@@ -863,47 +998,56 @@ export default function BrandingEditorClient() {
                 />
               </div>
 
-              {/* Auto / Manual Detection toolbar */}
-              <DetectionPanel
-                isDetecting={isDetecting}
-                detectionStatus={detectionStatus}
-                isManualSelecting={isManualSelecting}
-                detectedPlates={detectedPlates}
-                isModelMissing={isModelMissing}
-                onDetect={handleDetectNumberPlate}
-                onToggleManualSelection={isManualSelecting ? handleCancelManualSelection : handleStartManualSelection}
-                onBrandAll={handleBrandAllDetectedPlates}
-                onClearBoxes={clearDetectionBoxes}
-              />
+              {isInitializingImage ? (
+                <div className="flex-1 flex flex-col items-center justify-center border border-neutral-900 rounded-xl bg-neutral-900/20 shadow-inner min-h-[300px]">
+                  <RefreshCw className="w-8 h-8 text-yellow-500 animate-spin mb-3" />
+                  <p className="text-sm font-medium text-neutral-300 font-mono">Preparing editor...</p>
+                </div>
+              ) : (
+                <>
+                  {/* Auto / Manual Detection toolbar */}
+                  <DetectionPanel
+                    isDetecting={isDetecting}
+                    detectionStatus={detectionStatus}
+                    isManualSelecting={isManualSelecting}
+                    detectedPlates={detectedPlates}
+                    isModelMissing={isModelMissing}
+                    onDetect={handleDetectNumberPlate}
+                    onToggleManualSelection={isManualSelecting ? handleCancelManualSelection : handleStartManualSelection}
+                    onBrandAll={handleBrandAllDetectedPlates}
+                    onClearBoxes={clearDetectionBoxes}
+                  />
 
-              {/* Editor Workspace Canvas */}
-              <EditorCanvas
-                containerRef={containerRef}
-                canvasElRef={canvasElRef}
-                isPreviewActive={isPreviewActive}
-              />
+                  {/* Editor Workspace Canvas */}
+                  <EditorCanvas
+                    containerRef={containerRef}
+                    canvasElRef={canvasElRef}
+                    isPreviewActive={isPreviewActive}
+                  />
 
-              {/* Editor Toolbar */}
-              <EditorToolbar
-                canUndo={undoStack.length > 1}
-                canRedo={redoStack.length > 0}
-                onUndo={handleUndo}
-                onRedo={handleRedo}
-                onZoomIn={() => handleZoom('in', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
-                onZoomOut={() => handleZoom('out', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
-                onZoomFit={() => handleZoom('fit', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
-                onDeleteSelected={() => handleDeleteSelectedPlate(() => handleWatermarkOptionsChange({ visible: false }))}
-                onReset={() => setIsConfirmResetOpen(true)}
-                onAddPlate={handleAddPlate}
-                hasSelection={activeObject !== null}
-                zoomLevel={editorZoom}
-              />
+                  {/* Editor Toolbar */}
+                  <EditorToolbar
+                    canUndo={undoStack.length > 1}
+                    canRedo={redoStack.length > 0}
+                    onUndo={handleUndo}
+                    onRedo={handleRedo}
+                    onZoomIn={() => handleZoom('in', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
+                    onZoomOut={() => handleZoom('out', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
+                    onZoomFit={() => handleZoom('fit', containerRef.current?.clientWidth || 800, Math.min(500, window.innerHeight * 0.5))}
+                    onDeleteSelected={() => handleDeleteSelectedPlate(() => handleWatermarkOptionsChange({ visible: false }))}
+                    onReset={() => setIsConfirmResetOpen(true)}
+                    onAddPlate={handleAddPlate}
+                    hasSelection={activeObject !== null}
+                    zoomLevel={editorZoom}
+                  />
+                </>
+              )}
             </div>
           )}
         </div>
 
         {/* Right Column: Settings */}
-        {imageUrl && (
+        {imageUrl && !isInitializingImage && (
           <div className="w-full md:w-85 bg-neutral-900/60 border-t md:border-t-0 md:border-l border-neutral-850 p-4 md:p-6 overflow-y-auto shrink-0 md:h-full flex flex-col space-y-4">
             <div className="flex border-b border-neutral-800 pb-2">
               <button
