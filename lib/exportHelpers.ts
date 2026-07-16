@@ -1,7 +1,6 @@
 import { Canvas, StaticCanvas, FabricImage, Group } from 'fabric';
 import { ExportPreset, ExportFormat, ExportQuality, FitMethod, WatermarkOptions, ImageMetadata, Point } from '../types';
 import { createNamePlate, getWatermarkCoords } from './canvasHelpers';
-import { warpCanvasPerspective } from './perspectiveWarp';
 
 interface ExportOptions {
   preset: ExportPreset;
@@ -187,52 +186,20 @@ export async function generateExportDataUrl(
     const customObj = obj as any;
 
     if (customObj.isNamePlate) {
-      const plateMode = customObj.plateMode || 'standard';
       const plateOptions = customObj.plateOptions;
+      const newPlate = createNamePlate(plateOptions, originalWidth, originalHeight);
+      
+      newPlate.set({
+        left: obj.left * scale + leftOffset,
+        top: obj.top * scale + topOffset,
+        scaleX: obj.scaleX * scale,
+        scaleY: obj.scaleY * scale,
+        angle: obj.angle,
+        opacity: obj.opacity,
+        selectable: false,
+      });
 
-      if (plateMode === 'standard') {
-        // Standard plate group
-        const newPlate = createNamePlate(plateOptions, originalWidth, originalHeight);
-        
-        newPlate.set({
-          left: obj.left * scale + leftOffset,
-          top: obj.top * scale + topOffset,
-          scaleX: obj.scaleX * scale,
-          scaleY: obj.scaleY * scale,
-          angle: obj.angle,
-          opacity: obj.opacity,
-          selectable: false,
-        });
-
-        tempCanvas.add(newPlate);
-      } else {
-        // Perspective plate
-        const corners: Point[] = customObj.corners;
-        if (corners && corners.length === 4) {
-          // Scale and offset corners
-          const scaledCorners = corners.map((p) => ({
-            x: p.x * scale + leftOffset,
-            y: p.y * scale + topOffset,
-          }));
-
-          const flatCanvas = renderFlatPlateCanvas(plateOptions, originalWidth, originalHeight);
-          const warpedCanvas = warpCanvasPerspective(flatCanvas, scaledCorners);
-
-          // Find coordinates bounding box
-          const minX = Math.min(...scaledCorners.map((p) => p.x));
-          const minY = Math.min(...scaledCorners.map((p) => p.y));
-
-          const warpedImageObj = new FabricImage(warpedCanvas, {
-            left: minX,
-            top: minY,
-            opacity: obj.opacity,
-            selectable: false,
-            evented: false,
-          });
-
-          tempCanvas.add(warpedImageObj);
-        }
-      }
+      tempCanvas.add(newPlate);
     } else if (customObj.isWatermark && watermarkOptions.visible) {
       // Replicate Watermark
       const logoImgElement = (obj as FabricImage).getElement() as HTMLImageElement;

@@ -22,8 +22,6 @@ interface PlateSettingsProps {
   onUpdateGeometry: (geom: Partial<PlateGeometry>) => void;
   onChange: (options: Partial<PlateOptions>) => void;
   onApplyPreset: (preset: PlatePreset) => void;
-  onReDetectAngle?: () => void;
-  isWarpedPlate?: boolean;
 }
 
 export default function PlateSettings({
@@ -33,8 +31,6 @@ export default function PlateSettings({
   onUpdateGeometry,
   onChange,
   onApplyPreset,
-  onReDetectAngle,
-  isWarpedPlate = false,
 }: PlateSettingsProps) {
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     onChange({ text: e.target.value });
@@ -67,11 +63,6 @@ export default function PlateSettings({
         <div className="space-y-3 bg-neutral-950 p-3.5 rounded-xl border border-neutral-850">
           <div className="flex items-center justify-between text-xs font-bold text-neutral-300 border-b border-neutral-850 pb-2">
             <span>POSITION & SIZE</span>
-            {isWarpedPlate && (
-              <span className="text-[10px] text-red-400 font-semibold uppercase bg-red-950 px-1.5 py-0.5 rounded">
-                Perspective
-              </span>
-            )}
           </div>
 
           {/* Numeric Fields / Sliders */}
@@ -228,17 +219,7 @@ export default function PlateSettings({
             </div>
           </div>
 
-          {/* Re-detect plate angle button */}
-          {onReDetectAngle && (
-            <button
-              type="button"
-              onClick={onReDetectAngle}
-              className="w-full mt-2 py-2 px-3 text-xs font-bold rounded-lg bg-neutral-900 hover:bg-neutral-850 text-white border border-neutral-800 transition-all cursor-pointer flex items-center justify-center gap-1.5"
-            >
-              <Compass className="w-3.5 h-3.5 text-red-500 animate-pulse" />
-              Re-detect Plate Angle
-            </button>
-          )}
+
         </div>
       ) : null}
 

@@ -260,3 +260,78 @@ export async function detectLicensePlates(
     };
   });
 }
+
+/**
+ * Estimates rotation angle using OpenCV contour analysis.
+ */
+export function estimateRotationOpenCV(
+  imgElement: HTMLImageElement,
+  box: { x: number; y: number; width: number; height: number }
+): number {
+  const cv = (window as any).cv;
+  if (!cv) return 0;
+
+  try {
+    const cropX = Math.max(0, Math.floor(box.x));
+    const cropY = Math.max(0, Math.floor(box.y));
+    const cropW = Math.min(imgElement.naturalWidth - cropX, Math.ceil(box.width));
+    const cropH = Math.min(imgElement.naturalHeight - cropY, Math.ceil(box.height));
+
+    if (cropW < 5 || cropH < 5) return 0;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = cropW;
+    canvas.height = cropH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return 0;
+    ctx.drawImage(imgElement, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+    const src = cv.imread(canvas);
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+
+    const blurred = new cv.Mat();
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+
+    const edges = new cv.Mat();
+    cv.Canny(blurred, edges, 50, 150, 3, false);
+
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    let maxArea = 0;
+    let bestAngle = 0;
+
+    for (let i = 0; i < contours.size(); ++i) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if (area > maxArea && area > (cropW * cropH) * 0.15) {
+        maxArea = area;
+        const rect = cv.minAreaRect(cnt);
+        let angle = rect.angle;
+        
+        if (rect.size.width < rect.size.height) {
+          angle = angle + 90;
+        }
+        
+        if (Math.abs(angle) < 45) {
+          bestAngle = angle;
+        }
+      }
+    }
+
+    src.delete();
+    gray.delete();
+    blurred.delete();
+    edges.delete();
+    contours.delete();
+    hierarchy.delete();
+
+    return bestAngle;
+  } catch (err) {
+    console.warn('Rotation estimation failed:', err);
+  }
+  return 0;
+}
+
